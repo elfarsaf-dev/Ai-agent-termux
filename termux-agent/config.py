@@ -100,7 +100,7 @@ def setup_wizard():
     providers = {
         "1": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
         "2": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
-        "3": ("Groq (gratis, cepat)", "https://api.groq.com/openai/v1", "llama-3.1-70b-versatile"),
+        "3": ("Groq (gratis, cepat)", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
         "4": ("Together AI", "https://api.together.xyz/v1", "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
         "5": ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o"),
         "6": ("Ollama (lokal, gratis)", "http://localhost:11434/v1", "llama3"),
