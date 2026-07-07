@@ -10,9 +10,9 @@ CONFIG_FILE = Path(__file__).parent / "config.json"
 ENV_FILE = Path(__file__).parent / ".env"
 
 DEFAULTS = {
-    "base_url": "https://api.openai.com/v1",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "api_key": "",
-    "model": "gpt-4o",
+    "model": "gemini-2.0-flash",
     "max_tokens": 4096,
     "temperature": 0.7,
     "system_prompt": (
@@ -98,12 +98,13 @@ def setup_wizard():
     print("Konfigurasi provider AI kamu.\n")
 
     providers = {
-        "1": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
-        "2": ("Groq (gratis, cepat)", "https://api.groq.com/openai/v1", "llama-3.1-70b-versatile"),
-        "3": ("Together AI", "https://api.together.xyz/v1", "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
-        "4": ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o"),
-        "5": ("Ollama (lokal, gratis)", "http://localhost:11434/v1", "llama3"),
-        "6": ("Custom / Lainnya", "", ""),
+        "1": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
+        "2": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
+        "3": ("Groq (gratis, cepat)", "https://api.groq.com/openai/v1", "llama-3.1-70b-versatile"),
+        "4": ("Together AI", "https://api.together.xyz/v1", "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
+        "5": ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o"),
+        "6": ("Ollama (lokal, gratis)", "http://localhost:11434/v1", "llama3"),
+        "7": ("Custom / Lainnya", "", ""),
     }
 
     print("Pilih provider:")
@@ -114,7 +115,7 @@ def setup_wizard():
     choice = input("Pilihan (1-6): ").strip() or "1"
     name, base_url, model = providers.get(choice, ("Custom", "", ""))
 
-    if choice == "6" or not base_url:
+    if choice == "7" or not base_url:
         base_url = input(f"Base URL (contoh: https://api.openai.com/v1): ").strip()
         model = input(f"Nama model: ").strip()
     else:

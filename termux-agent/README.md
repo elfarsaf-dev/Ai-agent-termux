@@ -56,12 +56,21 @@ Pertama kali jalan, kamu akan diminta memilih provider dan memasukkan API key.
 
 | Provider | Base URL | Catatan |
 |----------|----------|---------|
+| **Google Gemini** ⭐ | `https://generativelanguage.googleapis.com/v1beta/openai/` | Default, perlu API key |
 | OpenAI | `https://api.openai.com/v1` | Perlu API key |
 | Groq | `https://api.groq.com/openai/v1` | Gratis, cepat |
 | Together AI | `https://api.together.xyz/v1` | Perlu API key |
 | OpenRouter | `https://openrouter.ai/api/v1` | Banyak model |
 | Ollama | `http://localhost:11434/v1` | Lokal, gratis |
 | Custom | URL lainnya | Provider apapun yg OpenAI-compatible |
+
+### Cara dapat API key Gemini (gratis)
+
+1. Buka [aistudio.google.com](https://aistudio.google.com)
+2. Klik **Get API key** → **Create API key**
+3. Copy key-nya, paste saat setup agent
+
+Model yang tersedia: `gemini-2.0-flash` (default, cepat), `gemini-1.5-pro`, `gemini-1.5-flash`
 
 ### Cara ganti provider saat agent jalan
 
