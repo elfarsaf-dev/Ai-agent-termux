@@ -12,6 +12,7 @@ Tidak butuh install apapun selain Python 3!
 import sys
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 
@@ -41,6 +42,35 @@ def red(t):     return _c(t, "91")
 def bold(t):    return _c(t, "1")
 def dim(t):     return _c(t, "2")
 def magenta(t): return _c(t, "95")
+
+
+def clear_screen():
+    """Bersihkan layar terminal."""
+    os.system("clear" if os.name != "nt" else "cls")
+
+
+def typewriter(text: str, delay: float = 0.018):
+    """
+    Print teks per-huruf dengan efek ketik.
+    Baris baru & spasi lebih cepat, huruf biasa pakai delay.
+    """
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+
+        # Jeda antar karakter — tanda baca sedikit lebih lama
+        if ch in (".", "!", "?", "\n"):
+            time.sleep(delay * 5)
+        elif ch in (",", ";", ":"):
+            time.sleep(delay * 2)
+        elif ch == " ":
+            time.sleep(delay * 0.4)
+        else:
+            time.sleep(delay)
+        i += 1
+    print()  # newline di akhir
 
 
 # ──────────────────────────────────────────────
@@ -372,7 +402,18 @@ def main():
         print()
         try:
             reply = agent.chat(user_input)
-            print(f"\n{bold(green('AI:'))}\n{reply}\n")
+
+            # Bersihkan layar, tampilkan ulang konteks ringkas
+            clear_screen()
+            print(dim("─" * 44))
+            print(f"{bold(cyan('Kamu:'))} {user_input}\n")
+            print(f"{bold(green('AI:'))}")
+            if reply.startswith("❌"):
+                # Error — langsung print tanpa animasi
+                print(reply)
+            else:
+                typewriter(reply)
+            print(f"\n{dim('─' * 44)}")
         except KeyboardInterrupt:
             print(f"\n{yellow('⚠️  Dibatalkan.')}")
             if agent.history and agent.history[-1]["role"] == "user":
