@@ -22,7 +22,7 @@ try:
 except ImportError:
     pass
 
-from config import load_config, setup_wizard
+from config import load_config, setup_wizard, save_config, PROVIDER_PRESETS
 import tools as _tools_module
 from tools import TOOL_DEFINITIONS, dispatch_tool
 
@@ -80,65 +80,161 @@ def typewriter(text: str, delay: float = 0.018):
 # ──────────────────────────────────────────────
 
 class APIError(Exception):
-    def __init__(self, message: str, status_code: int = 0):
+    def __init__(self, message: str, status_code: int = 0, retry_after: float = 0):
         super().__init__(message)
-        self.status_code = status_code
+        self.status_code  = status_code
+        self.retry_after  = retry_after  # detik dari Retry-After header
 
 
-def call_api(cfg: dict, messages: list, tools: list) -> dict:
+def _provider_label(cfg: dict) -> str:
+    """Nama pendek provider dari base_url."""
+    url = cfg.get("base_url", "")
+    if "groq"        in url: return "Groq"
+    if "googleapis"  in url: return "Gemini"
+    if "openai.com"  in url: return "OpenAI"
+    if "together"    in url: return "Together AI"
+    if "openrouter"  in url: return "OpenRouter"
+    if "anthropic"   in url: return "Anthropic"
+    if "localhost" in url or "127.0.0.1" in url: return "Ollama"
+    host = url.split("/")[2] if url.count("/") >= 2 else url
+    return host
+
+
+def _raw_call(provider: dict, messages: list, tools: list, base_cfg: dict) -> dict:
     """
-    Panggil OpenAI-compatible Chat Completions API pakai urllib.
-    Tidak butuh library eksternal apapun.
+    Satu kali panggil API pakai provider tertentu.
+    provider harus punya: base_url, api_key, model.
+    base_cfg dipakai untuk max_tokens, temperature, dll.
     """
-    base_url = cfg.get("base_url", "").rstrip("/")
-    api_key  = cfg.get("api_key", "no-key")
-    model    = cfg.get("model", "gemini-2.0-flash")
-
-    url = f"{base_url}/chat/completions"
+    base_url = provider.get("base_url", "").rstrip("/")
+    api_key  = provider.get("api_key") or base_cfg.get("api_key", "no-key")
+    model    = provider.get("model")   or base_cfg.get("model", "gemini-2.0-flash")
 
     payload = {
-        "model": model,
-        "messages": messages,
-        "tools": tools,
+        "model"      : model,
+        "messages"   : messages,
+        "tools"      : tools,
         "tool_choice": "auto",
-        "max_tokens": int(cfg.get("max_tokens", 4096)),
-        "temperature": float(cfg.get("temperature", 0.7)),
+        "max_tokens" : int(base_cfg.get("max_tokens", 4096)),
+        "temperature": float(base_cfg.get("temperature", 0.7)),
     }
-
-    body = json.dumps(payload).encode("utf-8")
+    body    = json.dumps(payload).encode("utf-8")
     headers = {
-        "Content-Type": "application/json",
+        "Content-Type" : "application/json",
         "Authorization": f"Bearer {api_key}",
-        "User-Agent": "termux-agent/1.0",
+        "User-Agent"   : "termux-agent/1.0",
     }
-
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions", data=body, headers=headers, method="POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             if not isinstance(data, dict):
-                raise APIError(f"Response tidak terduga dari API: {str(data)[:200]}")
+                raise APIError(f"Response tidak terduga: {str(data)[:200]}")
             return data
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
+        # Coba baca Retry-After header
+        retry_after = 0.0
+        try:
+            retry_after = float(e.headers.get("Retry-After", 0))
+        except (ValueError, AttributeError):
+            pass
+        # Parse pesan error
         try:
             err_data = json.loads(raw)
-            if isinstance(err_data, dict):
-                msg = (
-                    err_data.get("error", {}).get("message")
-                    or err_data.get("message")
-                    or raw[:300]
-                )
-            else:
-                msg = raw[:300]
+            msg = (
+                (err_data.get("error", {}).get("message") if isinstance(err_data, dict) else None)
+                or (err_data.get("message") if isinstance(err_data, dict) else None)
+                or raw[:300]
+            )
         except json.JSONDecodeError:
             msg = raw[:300]
-        raise APIError(msg, status_code=e.code) from e
+        raise APIError(msg, status_code=e.code, retry_after=retry_after) from e
     except urllib.error.URLError as e:
-        raise APIError(f"Tidak bisa konek ke API: {e.reason}") from e
+        raise APIError(f"Tidak bisa konek: {e.reason}")
     except TimeoutError:
-        raise APIError("Request timeout — cek koneksi internet kamu.")
+        raise APIError("Request timeout.")
+
+
+def call_api(cfg: dict, messages: list, tools: list,
+             on_switch: "callable | None" = None) -> dict:
+    """
+    Panggil API dengan auto-retry + multi-provider fallback.
+
+    Strategi per-provider:
+      • 429 → tunggu Retry-After (atau backoff 2s/5s/10s), max 2 retry
+              kalau masih gagal → provider berikutnya
+      • 5xx → backoff 1s/3s, max 1 retry → provider berikutnya
+      • network error → provider berikutnya langsung
+
+    on_switch(label) dipanggil saat beralih provider (untuk notif UI).
+    """
+    # Bangun daftar provider: utama dulu, lalu fallback
+    primary = {
+        "base_url": cfg.get("base_url", ""),
+        "api_key" : cfg.get("api_key", ""),
+        "model"   : cfg.get("model", ""),
+    }
+    fallbacks  = cfg.get("fallback_providers", [])
+    providers  = [primary] + list(fallbacks)
+
+    last_error = None
+    for i, provider in enumerate(providers):
+        label = _provider_label(provider)
+        if i > 0 and on_switch:
+            on_switch(label)
+
+        # Retry loop untuk provider ini
+        wait_schedule = [2, 5, 10]   # detik tunggu saat 429
+        server_sched  = [1, 3]       # detik tunggu saat 5xx
+
+        attempt429 = 0
+        attempt5xx = 0
+
+        while True:
+            try:
+                return _raw_call(provider, messages, tools, cfg)
+            except APIError as e:
+                last_error = e
+                if e.status_code == 429:
+                    if attempt429 < len(wait_schedule):
+                        wait = e.retry_after if e.retry_after > 0 else wait_schedule[attempt429]
+                        wait = min(wait, 60)  # cap 60 detik
+                        print(f"\n  {yellow(f'⏳ {label} rate limit — tunggu {wait:.0f}s...')}")
+                        time.sleep(wait)
+                        attempt429 += 1
+                        continue
+                    # Retries habis → coba provider berikutnya
+                    print(f"  {yellow(f'⚡ {label} limit tercapai, coba provider cadangan...')}")
+                    break
+                elif e.status_code >= 500:
+                    if attempt5xx < len(server_sched):
+                        wait = server_sched[attempt5xx]
+                        print(f"\n  {yellow(f'⚠️  {label} server error {e.status_code} — retry {wait}s...')}")
+                        time.sleep(wait)
+                        attempt5xx += 1
+                        continue
+                    print(f"  {yellow(f'⚡ {label} server error terus, coba provider cadangan...')}")
+                    break
+                elif e.status_code == 401:
+                    # API key salah — langsung ke provider berikutnya
+                    print(f"  {yellow(f'🔑 {label} API key ditolak, coba provider cadangan...')}")
+                    break
+                else:
+                    # Error lain (network, parsing) — langsung ke provider berikutnya
+                    break
+
+    # Semua provider gagal
+    if last_error:
+        if last_error.status_code == 429:
+            raise APIError(
+                "Semua provider kena rate limit. Tunggu sebentar atau tambah provider cadangan (/fallback).",
+                status_code=429,
+            )
+        raise last_error
+    raise APIError("Semua provider gagal.")
 
 
 # ──────────────────────────────────────────────
@@ -156,8 +252,9 @@ HELP_TEXT = """
 Perintah khusus:
   /help      — tampilkan bantuan ini
   /clear     — hapus riwayat percakapan
-  /config    — ubah provider/model/API key
-  /status    — info konfigurasi saat ini
+  /config    — ubah provider/model/API key utama
+  /fallback  — kelola provider cadangan (auto-switch saat limit)
+  /status    — info konfigurasi + provider aktif
   /tools     — daftar tools yang tersedia
   /history   — lihat riwayat chat
   /upgrade   — mode self-upgrade (AI edit kode dirinya sendiri)
@@ -210,6 +307,7 @@ class Agent:
         self.cfg = cfg
         self.history: list[dict] = []
         self.total_tokens = 0
+        self.active_provider: str = _provider_label(cfg)  # provider yg sedang dipakai
 
     def _system_message(self) -> dict:
         cwd = os.getcwd()
@@ -236,6 +334,8 @@ class Agent:
 
     def chat(self, user_input: str) -> str:
         """Kirim pesan ke AI dan jalankan tool calls jika ada."""
+        # Reset ke provider utama di awal setiap request baru
+        self.active_provider = _provider_label(self.cfg)
         self.history.append({"role": "user", "content": user_input})
 
         # Trim history agar tidak terlalu panjang
@@ -245,14 +345,23 @@ class Agent:
 
         messages = [self._system_message()] + self.history
 
+        def _on_provider_switch(label: str):
+            self.active_provider = label
+            print(f"\n  {cyan(f'↪ Beralih ke {label}...')}")
+
         while True:
             try:
-                response = call_api(self.cfg, messages, TOOL_DEFINITIONS)
+                response = call_api(self.cfg, messages, TOOL_DEFINITIONS,
+                                    on_switch=_on_provider_switch)
             except APIError as e:
                 if e.status_code == 401:
                     return red("❌ API key tidak valid. Ketik /config untuk atur ulang.")
                 elif e.status_code == 429:
-                    return red("❌ Rate limit tercapai. Tunggu sebentar lalu coba lagi.")
+                    return red(
+                        "❌ Semua provider kena rate limit.\n"
+                        "  • Tunggu sebentar lalu coba lagi, atau\n"
+                        "  • Ketik /fallback untuk tambah provider cadangan."
+                    )
                 elif e.status_code >= 500:
                     return red(f"❌ Server error ({e.status_code}). Coba lagi nanti.")
                 return red(f"❌ API error: {e}")
@@ -351,11 +460,19 @@ class Agent:
     def show_status(self):
         api_key = self.cfg.get("api_key", "")
         key_display = ("*" * 8 + api_key[-4:]) if len(api_key) > 4 else ("(kosong)" if not api_key else api_key)
+        fallbacks = self.cfg.get("fallback_providers", [])
+        fb_lines = ""
+        for i, fb in enumerate(fallbacks, 1):
+            fb_label = _provider_label(fb)
+            fb_model = fb.get("model", "-")
+            active_mark = green(" ← aktif") if self.active_provider == fb_label else ""
+            fb_lines += f"\n  Fallback {i}: {cyan(fb_label)} / {fb_model}{active_mark}"
+        active_mark = green(" ← aktif") if self.active_provider == _provider_label(self.cfg) else ""
         print(f"""
 {bold('Status Konfigurasi:')}
-  Provider : {cyan(self.cfg.get('base_url', '-'))}
-  Model    : {cyan(self.cfg.get('model', '-'))}
-  API Key  : {dim(key_display)}
+  Provider : {cyan(_provider_label(self.cfg))} / {self.cfg.get('model', '-')}{active_mark}
+  URL      : {dim(self.cfg.get('base_url', '-'))}
+  API Key  : {dim(key_display)}{fb_lines}
   Pesan    : {len(self.history)} dalam history
   Token    : {self.total_tokens:,} (sesi ini)
   Dir      : {os.getcwd()}
@@ -383,6 +500,124 @@ class Agent:
 
 
 # ──────────────────────────────────────────────
+# FALLBACK PROVIDER WIZARD
+# ──────────────────────────────────────────────
+
+def _fallback_wizard(cfg: dict) -> dict:
+    """Kelola daftar provider cadangan secara interaktif."""
+    fallbacks = list(cfg.get("fallback_providers", []))
+
+    while True:
+        print(f"\n{bold(cyan('⚡ Provider Cadangan (Fallback)'))}")
+        print(dim("─" * 44))
+        print("Kalau provider utama kena rate limit, agent otomatis")
+        print("pindah ke provider cadangan berikutnya.\n")
+
+        # Tampilkan provider utama
+        print(f"  {bold('0.')} {green('[UTAMA]')} {_provider_label(cfg)} / {cfg.get('model','-')}")
+        if not fallbacks:
+            print(f"  {dim('(belum ada provider cadangan)')}")
+        else:
+            for i, fb in enumerate(fallbacks, 1):
+                label = _provider_label(fb)
+                model = fb.get("model", "-")
+                has_key = "🔑" if fb.get("api_key") else dim("(no key)")
+                print(f"  {bold(str(i)+'.')} {cyan(label)} / {model}  {has_key}")
+
+        print(f"\n  {bold('a')} — tambah provider cadangan")
+        print(f"  {bold('h')} — hapus provider cadangan")
+        print(f"  {bold('t')} — test urutan provider saat ini")
+        print(f"  {bold('q')} — selesai")
+        print(dim("─" * 44))
+
+        try:
+            choice = input(f"\n{bold(magenta('Pilihan: '))}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            break
+
+        if choice == "q":
+            break
+
+        elif choice == "a":
+            print(f"\n{bold('Pilih provider cadangan:')}")
+            presets = PROVIDER_PRESETS
+            for k, (name, url, model) in presets.items():
+                print(f"  {k}. {name}  {dim(model)}")
+            try:
+                pc = input("Pilihan (atau Enter untuk custom): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                continue
+
+            preset = presets.get(pc)
+            if preset:
+                name, base_url, model = preset
+                # Custom / preset dengan URL kosong → minta input manual
+                if not base_url:
+                    base_url = input("Base URL (contoh: https://api.example.com/v1): ").strip()
+                    if not base_url:
+                        print(yellow("Base URL tidak boleh kosong. Batal."))
+                        continue
+                if not model:
+                    model = input("Nama model: ").strip()
+                    if not model:
+                        print(yellow("Nama model tidak boleh kosong. Batal."))
+                        continue
+                custom_m = input(f"Model [{model}]: ").strip()
+                model = custom_m or model
+            else:
+                # Enter ditekan tanpa pilih preset → full custom
+                base_url = input("Base URL (contoh: https://api.example.com/v1): ").strip()
+                if not base_url:
+                    print(yellow("Base URL tidak boleh kosong. Batal."))
+                    continue
+                model = input("Nama model: ").strip()
+                if not model:
+                    print(yellow("Nama model tidak boleh kosong. Batal."))
+                    continue
+
+            api_key = ""
+            if "localhost" not in base_url and "127.0.0.1" not in base_url:
+                api_key = input("API Key: ").strip()
+
+            fallbacks.append({"base_url": base_url, "api_key": api_key, "model": model})
+            cfg["fallback_providers"] = fallbacks
+            save_config(cfg)
+            # api_key sudah tersimpan di config.json (device lokal) — tidak perlu duplikasi ke .env
+
+            print(green(f"✅ {_provider_label({'base_url': base_url})} ditambahkan sebagai fallback."))
+
+        elif choice == "h":
+            if not fallbacks:
+                print(yellow("Belum ada provider cadangan."))
+                continue
+            try:
+                idx = int(input("Hapus nomor berapa? ").strip()) - 1
+                if 0 <= idx < len(fallbacks):
+                    removed = fallbacks.pop(idx)
+                    cfg["fallback_providers"] = fallbacks
+                    save_config(cfg)
+                    print(green(f"✅ {_provider_label(removed)} dihapus dari fallback."))
+                else:
+                    print(yellow("Nomor tidak valid."))
+            except (ValueError, KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == "t":
+            total = 1 + len(fallbacks)
+            print(f"\n{bold('Urutan provider saat ini:')}")
+            print(f"  1. {green('[UTAMA]')} {_provider_label(cfg)} / {cfg.get('model','-')}")
+            for i, fb in enumerate(fallbacks, 2):
+                print(f"  {i}. {cyan('[CADANGAN]')} {_provider_label(fb)} / {fb.get('model','-')}")
+            print(f"\n  {dim(f'Total {total} provider. Agent akan coba urutan ini saat ada error.')}")
+
+        else:
+            print(yellow("Pilihan tidak dikenal."))
+
+    return cfg
+
+
+# ──────────────────────────────────────────────
 # MAIN LOOP
 # ──────────────────────────────────────────────
 
@@ -407,8 +642,13 @@ def main():
 
     agent = Agent(cfg)
 
-    print(f"  Model  : {bold(cyan(cfg.get('model', '-')))}")
-    print(f"  Server : {dim(cfg.get('base_url', '-'))}")
+    fallbacks = cfg.get("fallback_providers", [])
+    fb_info = (
+        green(f"+ {len(fallbacks)} fallback")
+        if fallbacks else dim("(ketik /fallback untuk tambah cadangan)")
+    )
+    print(f"  Provider: {bold(cyan(_provider_label(cfg)))} / {cfg.get('model', '-')}")
+    print(f"  Fallback: {fb_info}")
     print(f"\n  Ketik {bold('/help')} untuk bantuan, {bold('/exit')} untuk keluar.\n")
     print(dim("─" * 44))
 
@@ -439,6 +679,10 @@ def main():
                 agent.show_history()
             elif cmd == "/config":
                 cfg = setup_wizard()
+                agent.cfg = cfg
+                agent.active_provider = _provider_label(cfg)
+            elif cmd == "/fallback":
+                cfg = _fallback_wizard(cfg)
                 agent.cfg = cfg
             elif cmd == "/upgrade":
                 # Mode self-upgrade: AI edit kode dirinya sendiri

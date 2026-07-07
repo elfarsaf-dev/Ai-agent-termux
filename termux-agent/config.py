@@ -83,11 +83,25 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    """Simpan config ke config.json (hapus api_key dari file, simpan di env saja)."""
+    """Simpan config ke config.json.
+    api_key utama tidak disimpan ke file (pakai .env).
+    api_key fallback_providers disimpan di file (device lokal, aman).
+    """
     save_data = {k: v for k, v in cfg.items() if k != "api_key"}
     with open(CONFIG_FILE, "w") as f:
         json.dump(save_data, f, indent=2, ensure_ascii=False)
     print(f"✅ Config disimpan ke {CONFIG_FILE}")
+
+
+PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
+    "1": ("Google Gemini",       "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
+    "2": ("OpenAI",              "https://api.openai.com/v1",                               "gpt-4o"),
+    "3": ("Groq",                "https://api.groq.com/openai/v1",                          "llama-3.3-70b-versatile"),
+    "4": ("Together AI",         "https://api.together.xyz/v1",                             "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
+    "5": ("OpenRouter",          "https://openrouter.ai/api/v1",                            "openai/gpt-4o"),
+    "6": ("Ollama (lokal)",      "http://localhost:11434/v1",                               "llama3"),
+    "7": ("Custom / Lainnya",   "",                                                         ""),
+}
 
 
 def setup_wizard():
@@ -97,22 +111,15 @@ def setup_wizard():
     print("═" * 50)
     print("Konfigurasi provider AI kamu.\n")
 
-    providers = {
-        "1": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
-        "2": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
-        "3": ("Groq (gratis, cepat)", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
-        "4": ("Together AI", "https://api.together.xyz/v1", "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
-        "5": ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o"),
-        "6": ("Ollama (lokal, gratis)", "http://localhost:11434/v1", "llama3"),
-        "7": ("Custom / Lainnya", "", ""),
-    }
+    providers = PROVIDER_PRESETS
 
     print("Pilih provider:")
     for k, (name, url, model) in providers.items():
-        print(f"  {k}. {name}")
+        note = " ← limit cepet, cocok buat fallback" if "Groq" in name else ""
+        print(f"  {k}. {name}{note}")
     print()
 
-    choice = input("Pilihan (1-6): ").strip() or "1"
+    choice = input("Pilihan (1-7): ").strip() or "1"
     name, base_url, model = providers.get(choice, ("Custom", "", ""))
 
     if choice == "7" or not base_url:
