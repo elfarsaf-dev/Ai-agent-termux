@@ -84,16 +84,22 @@ def call_api(cfg: dict, messages: list, tools: list) -> dict:
 
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise APIError(f"Response tidak terduga dari API: {str(data)[:200]}")
+            return data
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
         try:
             err_data = json.loads(raw)
-            msg = (
-                err_data.get("error", {}).get("message")
-                or err_data.get("message")
-                or raw[:300]
-            )
+            if isinstance(err_data, dict):
+                msg = (
+                    err_data.get("error", {}).get("message")
+                    or err_data.get("message")
+                    or raw[:300]
+                )
+            else:
+                msg = raw[:300]
         except json.JSONDecodeError:
             msg = raw[:300]
         raise APIError(msg, status_code=e.code) from e
@@ -185,8 +191,11 @@ class Agent:
             except Exception as e:
                 return red(f"❌ Error: {e}")
 
-            choice = response.get("choices", [{}])[0]
-            msg    = choice.get("message", {})
+            try:
+                choice = response.get("choices", [{}])[0]
+                msg    = choice.get("message", {})
+            except (IndexError, AttributeError, KeyError) as e:
+                return red(f"❌ Response API tidak terduga: {e}\nRaw: {str(response)[:200]}")
 
             usage = response.get("usage", {})
             self.total_tokens += usage.get("total_tokens", 0)
