@@ -15,6 +15,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 try:
     import readline  # noqa: F401 — aktifkan arrow keys & history di terminal
@@ -22,6 +23,7 @@ except ImportError:
     pass
 
 from config import load_config, setup_wizard
+import tools as _tools_module
 from tools import TOOL_DEFINITIONS, dispatch_tool
 
 # ──────────────────────────────────────────────
@@ -158,6 +160,7 @@ Perintah khusus:
   /status    — info konfigurasi saat ini
   /tools     — daftar tools yang tersedia
   /history   — lihat riwayat chat
+  /upgrade   — mode self-upgrade (AI edit kode dirinya sendiri)
   /exit      — keluar
   Ctrl+C     — keluar (atau batalkan input)
 
@@ -168,6 +171,33 @@ Contoh penggunaan:
   › buat script backup otomatis ke /sdcard/backup
   › hitung fibonacci ke-50 pakai Python
   › install cowsay dan tampilkan pesan lucu
+  › tambahkan fitur baru ke dirimu sendiri: tool untuk translate teks
+  › perbaiki bug di tools.py baris 42
+"""
+
+UPGRADE_PROMPT = """\
+Kamu adalah AI agent yang bisa memodifikasi source code dirimu sendiri.
+
+File source code kamu ada di direktori: {agent_dir}
+  - agent.py   — main loop, UI, HTTP client, kelas Agent
+  - tools.py   — semua implementasi tool + TOOL_DEFINITIONS
+  - config.py  — load/save konfigurasi
+
+Instruksi user untuk upgrade/perbaikan:
+{user_request}
+
+Langkah yang harus kamu lakukan:
+1. Baca file yang relevan dengan read_file (baca source code kamu sendiri)
+2. Rencanakan perubahan — pastikan kamu paham struktur kodenya dulu
+3. Terapkan perubahan dengan patch_file (JANGAN tulis ulang seluruh file)
+4. Setelah semua patch berhasil, panggil reload_agent untuk restart
+
+Aturan keselamatan:
+- Selalu gunakan patch_file, bukan write_file, untuk mengedit source code agent
+- Backup otomatis dibuat sebelum setiap patch (.bak)
+- patch_file akan validasi syntax Python sebelum menyimpan
+- Kalau tidak yakin, baca dulu kodenya sebelum edit
+- Perubahan pada TOOL_DEFINITIONS harus diikuti perubahan di dispatch_tool()
 """
 
 
@@ -184,6 +214,7 @@ class Agent:
     def _system_message(self) -> dict:
         cwd = os.getcwd()
         python_ver = sys.version.split()[0]
+        agent_dir = str(_tools_module.AGENT_DIR)
         return {
             "role": "system",
             "content": (
@@ -192,7 +223,14 @@ class Agent:
                 f"- Working directory: {cwd}\n"
                 f"- Python: {python_ver}\n"
                 f"- Platform: {sys.platform}\n"
-                f"- Shell tersedia: bash, sh"
+                f"- Shell tersedia: bash, sh\n\n"
+                f"Kemampuan self-modification:\n"
+                f"- Source code kamu ada di: {agent_dir}\n"
+                f"- File utama: agent.py, tools.py, config.py\n"
+                f"- Gunakan list_agent_files() untuk lihat semua file\n"
+                f"- Gunakan read_file() untuk baca kode kamu sendiri\n"
+                f"- Gunakan patch_file() untuk edit kode kamu sendiri (LEBIH AMAN dari write_file)\n"
+                f"- Gunakan reload_agent() untuk restart setelah edit selesai"
             ),
         }
 
@@ -271,19 +309,23 @@ class Agent:
 
     def _print_tool_call(self, name: str, args: dict):
         summary_map = {
-            "execute_shell": lambda a: a.get("command", ""),
-            "run_python":    lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
-            "run_bash":      lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
-            "read_file":     lambda a: a.get("path", ""),
-            "write_file":    lambda a: f"{a.get('path','')} ({len(a.get('content',''))} char)",
-            "list_directory":lambda a: a.get("path", "."),
-            "web_search":    lambda a: a.get("query", ""),
-            "fetch_url":     lambda a: a.get("url", ""),
+            "execute_shell":   lambda a: a.get("command", ""),
+            "run_python":      lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
+            "run_bash":        lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
+            "read_file":       lambda a: a.get("path", ""),
+            "write_file":      lambda a: f"{a.get('path','')} ({len(a.get('content',''))} char)",
+            "list_directory":  lambda a: a.get("path", "."),
+            "web_search":      lambda a: a.get("query", ""),
+            "fetch_url":       lambda a: a.get("url", ""),
+            "patch_file":      lambda a: f"{a.get('path','')} — ganti {len(a.get('old_text',''))} char",
+            "reload_agent":    lambda a: "restart agent...",
+            "list_agent_files":lambda a: "source files",
         }
         icon_map = {
             "execute_shell": "🖥️ ", "run_python": "🐍", "run_bash": "📜",
             "read_file": "📖", "write_file": "✏️ ", "list_directory": "📁",
             "web_search": "🔍", "fetch_url": "🌐",
+            "patch_file": "🔧", "reload_agent": "🔄", "list_agent_files": "📂",
         }
         icon = icon_map.get(name, "⚙️ ")
         try:
@@ -345,6 +387,9 @@ class Agent:
 # ──────────────────────────────────────────────
 
 def main():
+    # Beritahu tools module di mana letak source code agent ini
+    _tools_module.AGENT_DIR = str(Path(__file__).parent.resolve())
+
     print(cyan(BANNER))
 
     cfg = load_config()
@@ -395,6 +440,50 @@ def main():
             elif cmd == "/config":
                 cfg = setup_wizard()
                 agent.cfg = cfg
+            elif cmd == "/upgrade":
+                # Mode self-upgrade: AI edit kode dirinya sendiri
+                rest = user_input[len("/upgrade"):].strip()
+                if not rest:
+                    print(f"""
+{bold(cyan('🔧 Mode Self-Upgrade'))}
+{dim('─' * 44)}
+Dalam mode ini, AI akan membaca source code-nya sendiri,
+membuat perubahan yang kamu minta, lalu restart otomatis.
+
+{bold('Contoh:')}
+  /upgrade tambahkan tool untuk translate teks
+  /upgrade perbaiki typewriter animation biar lebih smooth
+  /upgrade tambahkan perintah /save untuk export riwayat chat
+  /upgrade buat history chat tersimpan ke file otomatis
+
+{yellow('⚠️  AI akan menulis ulang bagian kodenya sendiri.')}
+{dim('Backup .bak dibuat otomatis sebelum setiap perubahan.')}
+{dim('─' * 44)}
+""")
+                    try:
+                        rest = input(f"{bold(magenta('Apa yang mau diupgrade? '))} ").strip()
+                    except (KeyboardInterrupt, EOFError):
+                        print()
+                        continue
+                    if not rest:
+                        continue
+
+                agent_dir = str(_tools_module.AGENT_DIR)
+                upgrade_request = UPGRADE_PROMPT.format(
+                    agent_dir=agent_dir,
+                    user_request=rest,
+                )
+                print(f"\n{dim('🔧 Memulai self-upgrade...')}\n")
+                try:
+                    reply = agent.chat(upgrade_request)
+                    clear_screen()
+                    print(dim("─" * 44))
+                    print(f"{bold(cyan('Self-Upgrade:'))} {rest}\n")
+                    print(f"{bold(green('AI:'))}")
+                    typewriter(reply)
+                    print(f"\n{dim('─' * 44)}")
+                except KeyboardInterrupt:
+                    print(f"\n{yellow('⚠️  Upgrade dibatalkan.')}")
             else:
                 print(yellow(f"Perintah tidak dikenal: {cmd}. Ketik /help."))
             continue
