@@ -24,11 +24,17 @@ fi
 
 echo "✅ Python: $(python3 --version)"
 
-# ── 3. Upgrade pip ──
+# ── 3. Install Rust (dibutuhkan untuk build beberapa package) ──
+if ! command -v rustc &>/dev/null; then
+    echo "🦀 Install Rust (diperlukan untuk openai)..."
+    pkg install -y rust
+fi
+
+# ── 4. Upgrade pip ──
 echo "📦 Upgrade pip..."
 python3 -m pip install --upgrade pip -q
 
-# ── 4. Install dependencies ──
+# ── 5. Install dependencies ──
 echo "📦 Install dependencies..."
 pip install -r requirements.txt -q
 
