@@ -5,30 +5,20 @@
 ║   Chat · Shell · Files · Web · Code ║
 ╚══════════════════════════════════════╝
 
-Jalankan: python agent.py
+Jalankan: python3 agent.py
+Tidak butuh install apapun selain Python 3!
 """
 
 import sys
 import json
 import os
-import readline  # noqa: F401  — aktifkan arrow keys & history di terminal
-from typing import Optional
+import urllib.request
+import urllib.error
 
-# ── pastikan dependencies ada ──
-def _check_deps():
-    missing = []
-    try:
-        import openai  # noqa: F401
-    except ImportError:
-        missing.append("openai")
-    if missing:
-        print(f"\n❌ Dependency belum terinstall: {', '.join(missing)}")
-        print("Jalankan: pip install " + " ".join(missing))
-        sys.exit(1)
-
-_check_deps()
-
-import openai as _openai_module
+try:
+    import readline  # noqa: F401 — aktifkan arrow keys & history di terminal
+except ImportError:
+    pass
 
 from config import load_config, setup_wizard
 from tools import TOOL_DEFINITIONS, dispatch_tool
@@ -54,7 +44,67 @@ def magenta(t): return _c(t, "95")
 
 
 # ──────────────────────────────────────────────
-# BANNER
+# HTTP CLIENT (pakai urllib bawaan Python)
+# ──────────────────────────────────────────────
+
+class APIError(Exception):
+    def __init__(self, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def call_api(cfg: dict, messages: list, tools: list) -> dict:
+    """
+    Panggil OpenAI-compatible Chat Completions API pakai urllib.
+    Tidak butuh library eksternal apapun.
+    """
+    base_url = cfg.get("base_url", "").rstrip("/")
+    api_key  = cfg.get("api_key", "no-key")
+    model    = cfg.get("model", "gemini-2.0-flash")
+
+    url = f"{base_url}/chat/completions"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "max_tokens": int(cfg.get("max_tokens", 4096)),
+        "temperature": float(cfg.get("temperature", 0.7)),
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "termux-agent/1.0",
+    }
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            err_data = json.loads(raw)
+            msg = (
+                err_data.get("error", {}).get("message")
+                or err_data.get("message")
+                or raw[:300]
+            )
+        except json.JSONDecodeError:
+            msg = raw[:300]
+        raise APIError(msg, status_code=e.code) from e
+    except urllib.error.URLError as e:
+        raise APIError(f"Tidak bisa konek ke API: {e.reason}") from e
+    except TimeoutError:
+        raise APIError("Request timeout — cek koneksi internet kamu.")
+
+
+# ──────────────────────────────────────────────
+# BANNER & HELP
 # ──────────────────────────────────────────────
 
 BANNER = r"""
@@ -81,7 +131,9 @@ Contoh penggunaan:
   › list isi folder Downloads
   › buat script backup otomatis ke /sdcard/backup
   › hitung fibonacci ke-50 pakai Python
+  › install cowsay dan tampilkan pesan lucu
 """
+
 
 # ──────────────────────────────────────────────
 # AGENT CLASS
@@ -91,13 +143,7 @@ class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.history: list[dict] = []
-        self.client = self._make_client()
         self.total_tokens = 0
-
-    def _make_client(self):
-        api_key = self.cfg.get("api_key") or "no-key"
-        base_url = self.cfg.get("base_url", "https://api.openai.com/v1")
-        return _openai_module.OpenAI(api_key=api_key, base_url=base_url)
 
     def _system_message(self) -> dict:
         cwd = os.getcwd()
@@ -127,33 +173,29 @@ class Agent:
 
         while True:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.cfg.get("model", "gpt-4o"),
-                    messages=messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    max_tokens=int(self.cfg.get("max_tokens", 4096)),
-                    temperature=float(self.cfg.get("temperature", 0.7)),
-                )
-            except _openai_module.AuthenticationError:
-                return red("❌ API key tidak valid. Jalankan /config untuk mengatur ulang.")
-            except _openai_module.APIConnectionError as e:
-                return red(f"❌ Tidak bisa terhubung ke API: {e}\nCek koneksi internet kamu.")
-            except _openai_module.RateLimitError:
-                return red("❌ Rate limit tercapai. Tunggu sebentar lalu coba lagi.")
-            except _openai_module.APIStatusError as e:
-                return red(f"❌ API error {e.status_code}: {e.message}")
+                response = call_api(self.cfg, messages, TOOL_DEFINITIONS)
+            except APIError as e:
+                if e.status_code == 401:
+                    return red("❌ API key tidak valid. Ketik /config untuk atur ulang.")
+                elif e.status_code == 429:
+                    return red("❌ Rate limit tercapai. Tunggu sebentar lalu coba lagi.")
+                elif e.status_code >= 500:
+                    return red(f"❌ Server error ({e.status_code}). Coba lagi nanti.")
+                return red(f"❌ API error: {e}")
             except Exception as e:
                 return red(f"❌ Error: {e}")
 
-            msg = response.choices[0].message
-            usage = response.usage
-            if usage:
-                self.total_tokens += usage.total_tokens
+            choice = response.get("choices", [{}])[0]
+            msg    = choice.get("message", {})
+
+            usage = response.get("usage", {})
+            self.total_tokens += usage.get("total_tokens", 0)
+
+            tool_calls = msg.get("tool_calls") or []
 
             # Tidak ada tool call → jawaban final
-            if not msg.tool_calls:
-                reply = msg.content or ""
+            if not tool_calls:
+                reply = msg.get("content") or ""
                 self.history.append({"role": "assistant", "content": reply})
                 return reply
 
@@ -161,27 +203,27 @@ class Agent:
             messages.append(msg)
 
             tool_results = []
-            for tc in msg.tool_calls:
-                fn_name = tc.function.name
+            for tc in tool_calls:
+                fn_name = tc.get("function", {}).get("name", "")
                 try:
-                    fn_args = json.loads(tc.function.arguments)
+                    fn_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
                 except json.JSONDecodeError:
                     fn_args = {}
 
-                # Tampilkan progress tool
                 self._print_tool_call(fn_name, fn_args)
 
                 try:
                     result = dispatch_tool(fn_name, fn_args, self.cfg)
                 except (KeyError, TypeError) as e:
-                    result = f"❌ Argumen tool tidak lengkap/salah: {e}"
+                    result = f"❌ Argumen tool tidak lengkap: {e}"
                 except Exception as e:
                     result = f"❌ Tool error: {e}"
+
                 self._print_tool_result(result)
 
                 tool_results.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
 
@@ -189,31 +231,24 @@ class Agent:
             # Lanjut loop sampai AI selesai
 
     def _print_tool_call(self, name: str, args: dict):
-        # Ringkasan args yang informatif
         summary_map = {
             "execute_shell": lambda a: a.get("command", ""),
-            "run_python": lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
-            "run_bash": lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
-            "read_file": lambda a: a.get("path", ""),
-            "write_file": lambda a: f"{a.get('path','')} ({len(a.get('content',''))} char)",
-            "list_directory": lambda a: a.get("path", "."),
-            "web_search": lambda a: a.get("query", ""),
-            "fetch_url": lambda a: a.get("url", ""),
+            "run_python":    lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
+            "run_bash":      lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
+            "read_file":     lambda a: a.get("path", ""),
+            "write_file":    lambda a: f"{a.get('path','')} ({len(a.get('content',''))} char)",
+            "list_directory":lambda a: a.get("path", "."),
+            "web_search":    lambda a: a.get("query", ""),
+            "fetch_url":     lambda a: a.get("url", ""),
         }
         icon_map = {
-            "execute_shell": "🖥️ ",
-            "run_python": "🐍",
-            "run_bash": "📜",
-            "read_file": "📖",
-            "write_file": "✏️ ",
-            "list_directory": "📁",
-            "web_search": "🔍",
-            "fetch_url": "🌐",
+            "execute_shell": "🖥️ ", "run_python": "🐍", "run_bash": "📜",
+            "read_file": "📖", "write_file": "✏️ ", "list_directory": "📁",
+            "web_search": "🔍", "fetch_url": "🌐",
         }
         icon = icon_map.get(name, "⚙️ ")
-        summary_fn = summary_map.get(name, lambda a: str(a)[:60])
         try:
-            summary = summary_fn(args)
+            summary = summary_map.get(name, lambda a: str(a)[:60])(args)
         except Exception:
             summary = ""
         print(f"\n{dim('┌─')} {icon} {yellow(name)} {dim(summary)}")
@@ -222,9 +257,7 @@ class Agent:
         lines = result.strip().splitlines()
         if not lines:
             return
-        # Tampilkan max 20 baris
-        display = lines[:20]
-        for line in display:
+        for line in lines[:20]:
             print(f"  {dim('│')} {line}")
         if len(lines) > 20:
             print(f"  {dim('│')} {dim(f'... (+{len(lines)-20} baris)')}")
@@ -235,14 +268,12 @@ class Agent:
         print(green("✅ Riwayat percakapan dihapus."))
 
     def show_status(self):
-        base_url = self.cfg.get("base_url", "-")
-        model = self.cfg.get("model", "-")
         api_key = self.cfg.get("api_key", "")
         key_display = ("*" * 8 + api_key[-4:]) if len(api_key) > 4 else ("(kosong)" if not api_key else api_key)
         print(f"""
 {bold('Status Konfigurasi:')}
-  Provider : {cyan(base_url)}
-  Model    : {cyan(model)}
+  Provider : {cyan(self.cfg.get('base_url', '-'))}
+  Model    : {cyan(self.cfg.get('model', '-'))}
   API Key  : {dim(key_display)}
   Pesan    : {len(self.history)} dalam history
   Token    : {self.total_tokens:,} (sesi ini)
@@ -261,7 +292,7 @@ class Agent:
             print(dim("(history kosong)"))
             return
         for msg in self.history:
-            role = msg["role"]
+            role    = msg.get("role", "")
             content = msg.get("content") or ""
             if role == "user":
                 print(f"\n{bold(cyan('Kamu:'))} {content[:200]}")
@@ -283,11 +314,9 @@ def main():
         url = c.get("base_url", "")
         return "localhost" in url or "127.0.0.1" in url
 
-    # Jika belum ada API key dan bukan Ollama/local, jalankan setup
     if not cfg.get("api_key") and not _is_local(cfg):
         print(yellow("⚠️  API key belum dikonfigurasi."))
         cfg = setup_wizard()
-        # Re-evaluate setelah wizard — user bisa saja pilih provider lokal
         if not cfg.get("api_key") and not _is_local(cfg):
             print(red("❌ API key diperlukan. Keluar."))
             sys.exit(1)
@@ -309,7 +338,6 @@ def main():
         if not user_input:
             continue
 
-        # Perintah khusus
         if user_input.startswith("/"):
             cmd = user_input.lower().split()[0]
             if cmd in ("/exit", "/quit", "/q"):
@@ -328,19 +356,16 @@ def main():
             elif cmd == "/config":
                 cfg = setup_wizard()
                 agent.cfg = cfg
-                agent.client = agent._make_client()
             else:
                 print(yellow(f"Perintah tidak dikenal: {cmd}. Ketik /help."))
             continue
 
-        # Kirim ke AI
         print()
         try:
             reply = agent.chat(user_input)
             print(f"\n{bold(green('AI:'))}\n{reply}\n")
         except KeyboardInterrupt:
             print(f"\n{yellow('⚠️  Dibatalkan.')}")
-            # Hapus pesan user terakhir dari history
             if agent.history and agent.history[-1]["role"] == "user":
                 agent.history.pop()
 
