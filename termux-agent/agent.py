@@ -15,6 +15,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 try:
@@ -88,6 +89,8 @@ class APIError(Exception):
 
 def _provider_label(cfg: dict) -> str:
     """Nama pendek provider dari base_url."""
+    if cfg.get("kind") == "custom":
+        return "Custom API"
     url = cfg.get("base_url", "")
     if "groq"        in url: return "Groq"
     if "googleapis"  in url: return "Gemini"
@@ -158,6 +161,95 @@ def _raw_call(provider: dict, messages: list, tools: list, base_cfg: dict) -> di
         raise APIError("Request timeout.")
 
 
+def _custom_api_call(provider: dict, messages: list, timeout: int = 45) -> dict:
+    """
+    Adapter untuk custom API yang bukan OpenAI-compatible.
+
+    Format yang didukung saat ini:
+      GET <base_url>?text=<url_encoded_prompt>
+      Response JSON: { ..., "result": "jawaban", ... }
+
+    Contoh: https://api.nexray.eu.cc/ai/gpt-3.5-turbo?text=Hay
+    """
+    base_url = provider.get("base_url", "").strip()
+    if not base_url:
+        raise APIError("Custom API base_url kosong.")
+    parsed = urllib.parse.urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise APIError(
+            "Custom API URL tidak valid. Harus lengkap dengan scheme dan host, "
+            "contoh: https://api.nexray.eu.cc/ai/gpt-3.5-turbo"
+        )
+
+    # Bangun prompt dari seluruh conversation (system + user + assistant + tool results)
+    parts = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            continue
+        if role == "system":
+            parts.append(f"System: {content}")
+        elif role == "user":
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            parts.append(f"Assistant: {content}")
+        elif role == "tool":
+            parts.append(f"Tool result: {content[:500]}")
+    prompt = "\n\n".join(parts)
+
+    # Cap agar URL tidak terlalu panjang (GET memiliki batas panjang)
+    if len(prompt) > 6000:
+        prompt = "...[riwayat dibatasi]...\n\n" + prompt[-4000:]
+
+    # Bangun URL GET secara robust, handle query string yang sudah ada.
+    # base_url dianggap sebagai URL lengkap endpoint (misal https://api.nexray.eu.cc/ai/claude).
+    parsed = urllib.parse.urlsplit(base_url)
+    query = urllib.parse.parse_qs(parsed.query)
+    query["text"] = [prompt]
+    new_query = urllib.parse.urlencode(query, doseq=True)
+    url = urllib.parse.urlunsplit((
+        parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment
+    ))
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "termux-agent/1.0"}, method="GET"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise APIError(f"Custom API HTTP {e.code}: {e.reason}", status_code=e.code) from e
+    except urllib.error.URLError as e:
+        raise APIError(f"Custom API tidak bisa konek: {e.reason}") from e
+    except TimeoutError:
+        raise APIError("Custom API timeout.")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise APIError(f"Custom API response bukan JSON: {raw[:200]}")
+
+    if not isinstance(data, dict):
+        raise APIError(f"Custom API response tidak terduga: {raw[:200]}")
+
+    # Ambil jawaban dari beberapa kemungkinan field populer
+    result = (
+        data.get("result")
+        or data.get("response")
+        or data.get("message")
+        or data.get("content")
+        or data.get("answer")
+    )
+    if result is None:
+        raise APIError(f"Custom API tidak mengembalikan field jawaban: {list(data.keys())[:10]}")
+
+    return {
+        "choices": [{"message": {"role": "assistant", "content": str(result)}}],
+        "usage": {},
+    }
+
+
 def call_api(cfg: dict, messages: list, tools: list,
              on_switch: "callable | None" = None) -> dict:
     """
@@ -169,6 +261,7 @@ def call_api(cfg: dict, messages: list, tools: list,
       • 5xx → backoff 1s/3s, max 1 retry → provider berikutnya
       • network error → provider berikutnya langsung
 
+    Provider dengan kind="custom" dipanggil pakai adapter GET, bukan OpenAI endpoint.
     on_switch(label) dipanggil saat beralih provider (untuk notif UI).
     """
     # Bangun daftar provider: utama dulu, lalu fallback
@@ -176,6 +269,7 @@ def call_api(cfg: dict, messages: list, tools: list,
         "base_url": cfg.get("base_url", ""),
         "api_key" : cfg.get("api_key", ""),
         "model"   : cfg.get("model", ""),
+        "kind"    : cfg.get("kind", "openai"),
     }
     fallbacks  = cfg.get("fallback_providers", [])
     providers  = [primary] + list(fallbacks)
@@ -195,7 +289,10 @@ def call_api(cfg: dict, messages: list, tools: list,
 
         while True:
             try:
-                return _raw_call(provider, messages, tools, cfg)
+                if provider.get("kind") == "custom":
+                    return _custom_api_call(provider, messages)
+                else:
+                    return _raw_call(provider, messages, tools, cfg)
             except APIError as e:
                 last_error = e
                 if e.status_code == 429:
@@ -576,16 +673,28 @@ def _fallback_wizard(cfg: dict) -> dict:
                     print(yellow("Nama model tidak boleh kosong. Batal."))
                     continue
 
-            api_key = ""
-            if "localhost" not in base_url and "127.0.0.1" not in base_url:
-                api_key = input("API Key: ").strip()
+            # Tanya jenis endpoint
+            print(f"\n{bold('Jenis endpoint:')}")
+            print(f"  1. OpenAI-compatible (default) — pakai /chat/completions")
+            print(f"  2. Custom API — pakai adapter GET ?text=<prompt>")
+            try:
+                kind_choice = input("Pilihan (1/2): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                continue
+            kind = "custom" if kind_choice == "2" else "openai"
 
-            fallbacks.append({"base_url": base_url, "api_key": api_key, "model": model})
+            api_key = ""
+            if "localhost" not in base_url and "127.0.0.1" not in base_url and kind != "custom":
+                api_key = input("API Key: ").strip()
+            if kind == "custom":
+                print(dim("  (Custom API contoh: https://api.nexray.eu.cc/ai/gpt-3.5-turbo)"))
+
+            fallbacks.append({"base_url": base_url, "api_key": api_key, "model": model, "kind": kind})
             cfg["fallback_providers"] = fallbacks
             save_config(cfg)
             # api_key sudah tersimpan di config.json (device lokal) — tidak perlu duplikasi ke .env
 
-            print(green(f"✅ {_provider_label({'base_url': base_url})} ditambahkan sebagai fallback."))
+            print(green(f"✅ {_provider_label({'base_url': base_url, 'kind': kind})} ditambahkan sebagai fallback."))
 
         elif choice == "h":
             if not fallbacks:

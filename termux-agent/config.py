@@ -130,12 +130,21 @@ def setup_wizard():
         if custom_model:
             model = custom_model
 
+    # Tanya jenis endpoint (OpenAI-compatible vs custom GET API)
+    print(f"\nJenis endpoint:")
+    print(f"  1. OpenAI-compatible (default) — pakai /chat/completions")
+    print(f"  2. Custom API GET — pakai <url>?text=<prompt> (contoh Nexray)")
+    kind_choice = input("Pilihan (1/2): ").strip()
+    kind = "custom" if kind_choice == "2" else "openai"
+
     api_key = ""
-    if "localhost" not in base_url and "127.0.0.1" not in base_url:
+    if kind != "custom" and "localhost" not in base_url and "127.0.0.1" not in base_url:
         api_key = input("API Key: ").strip()
+    if kind == "custom":
+        print("  Custom API: masukkan URL lengkap endpoint, contoh https://api.nexray.eu.cc/ai/gpt-3.5-turbo")
 
     cfg = load_config()
-    cfg.update({"base_url": base_url, "api_key": api_key, "model": model})
+    cfg.update({"base_url": base_url, "api_key": api_key, "model": model, "kind": kind})
     save_config(cfg)
 
     # Simpan api_key ke .env agar tidak masuk config.json
