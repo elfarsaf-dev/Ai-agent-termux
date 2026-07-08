@@ -182,18 +182,19 @@ def _provider_label(cfg: dict) -> str:
     return host
 
 
-_REASONING_FIELDS = {"reasoning_details", "reasoning", "thinking"}
+_ASSISTANT_ALLOWED_KEYS = {"role", "content", "tool_calls", "name", "function_call"}
 
 
 def _sanitize_messages(messages: list) -> list:
     """
-    Hapus field reasoning (reasoning_details, reasoning, thinking) dari
-    pesan assistant agar kompatibel dengan semua provider (termasuk Groq).
+    Hanya pertahankan field standar OpenAI-compatible di pesan assistant,
+    buang semua field provider-spesifik (reasoning_details, refusal, thinking, dll.)
+    agar kompatibel dengan semua provider termasuk Groq.
     """
     sanitized = []
     for m in messages:
-        if m.get("role") == "assistant" and any(k in m for k in _REASONING_FIELDS):
-            m = {k: v for k, v in m.items() if k not in _REASONING_FIELDS}
+        if m.get("role") == "assistant":
+            m = {k: v for k, v in m.items() if k in _ASSISTANT_ALLOWED_KEYS}
         sanitized.append(m)
     return sanitized
 
@@ -602,7 +603,7 @@ class Agent:
                 return reply
 
             # Ada tool calls → jalankan semua
-            clean_msg = {k: v for k, v in msg.items() if k not in _REASONING_FIELDS}
+            clean_msg = {k: v for k, v in msg.items() if k in _ASSISTANT_ALLOWED_KEYS}
             messages.append(clean_msg)
             self.history.append(clean_msg)
 
