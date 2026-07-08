@@ -89,8 +89,11 @@ class APIError(Exception):
 
 def _provider_label(cfg: dict) -> str:
     """Nama pendek provider dari base_url."""
-    if cfg.get("kind") == "custom":
+    kind = cfg.get("kind", "")
+    if kind == "custom":
         return "Custom API"
+    if kind == "nexray":
+        return "Nexray"
     url = cfg.get("base_url", "")
     if "groq"        in url: return "Groq"
     if "googleapis"  in url: return "Gemini"
@@ -270,6 +273,7 @@ def call_api(cfg: dict, messages: list, tools: list,
         "api_key" : cfg.get("api_key", ""),
         "model"   : cfg.get("model", ""),
         "kind"    : cfg.get("kind", "openai"),
+        "nexray_urls": cfg.get("nexray_urls", []),
     }
     fallbacks  = cfg.get("fallback_providers", [])
     providers  = [primary] + list(fallbacks)
@@ -289,8 +293,28 @@ def call_api(cfg: dict, messages: list, tools: list,
 
         while True:
             try:
-                if provider.get("kind") == "custom":
+                kind = provider.get("kind", "")
+                if kind == "custom":
                     return _custom_api_call(provider, messages)
+                elif kind == "nexray":
+                    urls = provider.get("nexray_urls") or []
+                    if not urls:
+                        urls = [provider.get("base_url", "")]
+                    last_err = None
+                    for idx, url in enumerate(urls):
+                        if not url:
+                            continue
+                        sub = dict(provider)
+                        sub["base_url"] = url
+                        sub["kind"] = "custom"
+                        try:
+                            return _custom_api_call(sub, messages)
+                        except APIError as e:
+                            last_err = e
+                            if idx < len(urls) - 1:
+                                print(f"  {yellow(f'⚡ Nexray endpoint {idx+1} gagal, coba endpoint {idx+2}...')}")
+                            continue
+                    raise last_err or APIError("Semua endpoint Nexray gagal.")
                 else:
                     return _raw_call(provider, messages, tools, cfg)
             except APIError as e:
@@ -565,10 +589,14 @@ class Agent:
             active_mark = green(" ← aktif") if self.active_provider == fb_label else ""
             fb_lines += f"\n  Fallback {i}: {cyan(fb_label)} / {fb_model}{active_mark}"
         active_mark = green(" ← aktif") if self.active_provider == _provider_label(self.cfg) else ""
+        url_display = self.cfg.get('base_url', '-')
+        if self.cfg.get("kind") == "nexray":
+            urls = self.cfg.get("nexray_urls", [])
+            url_display = ", ".join(urls) if urls else "(kosong)"
         print(f"""
 {bold('Status Konfigurasi:')}
   Provider : {cyan(_provider_label(self.cfg))} / {self.cfg.get('model', '-')}{active_mark}
-  URL      : {dim(self.cfg.get('base_url', '-'))}
+  URL      : {dim(url_display)}
   API Key  : {dim(key_display)}{fb_lines}
   Pesan    : {len(self.history)} dalam history
   Token    : {self.total_tokens:,} (sesi ini)
@@ -640,6 +668,9 @@ def _fallback_wizard(cfg: dict) -> dict:
             print(f"\n{bold('Pilih provider cadangan:')}")
             presets = PROVIDER_PRESETS
             for k, (name, url, model) in presets.items():
+                # Nexray adalah provider utama dengan 3 endpoint, bukan fallback tunggal
+                if "Nexray" in name:
+                    continue
                 note = ""
                 if "OpenRouter" in name:
                     note = " ← ketik model ID manual"
@@ -745,14 +776,17 @@ def main():
 
     cfg = load_config()
 
-    def _is_local(c: dict) -> bool:
+    def _needs_key(c: dict) -> bool:
+        kind = c.get("kind", "openai")
+        if kind in ("custom", "nexray"):
+            return False
         url = c.get("base_url", "")
-        return "localhost" in url or "127.0.0.1" in url
+        return "localhost" not in url and "127.0.0.1" not in url
 
-    if not cfg.get("api_key") and not _is_local(cfg):
+    if not cfg.get("api_key") and _needs_key(cfg):
         print(yellow("⚠️  API key belum dikonfigurasi."))
         cfg = setup_wizard()
-        if not cfg.get("api_key") and not _is_local(cfg):
+        if not cfg.get("api_key") and _needs_key(cfg):
             print(red("❌ API key diperlukan. Keluar."))
             sys.exit(1)
 

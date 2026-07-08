@@ -99,8 +99,9 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
     "3": ("Groq",                "https://api.groq.com/openai/v1",                          "llama-3.3-70b-versatile"),
     "4": ("Together AI",         "https://api.together.xyz/v1",                             "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
     "5": ("OpenRouter",          "https://openrouter.ai/api/v1",                            ""),
-    "6": ("Ollama (lokal)",      "http://localhost:11434/v1",                               "llama3"),
-    "7": ("Custom / Lainnya",   "",                                                         ""),
+    "6": ("Nexray",              "",                                                          ""),
+    "7": ("Ollama (lokal)",      "http://localhost:11434/v1",                                 "llama3"),
+    "8": ("Custom / Lainnya",    "",                                                          ""),
 }
 
 
@@ -120,13 +121,34 @@ def setup_wizard():
             note = " ← limit cepet, cocok buat fallback"
         elif "OpenRouter" in name:
             note = " ← ketik model ID manual (contoh: openai/gpt-4o)"
+        elif "Nexray" in name:
+            note = " ← 3 URL custom API (saling bantu)"
         print(f"  {k}. {name}{note}")
     print()
 
-    choice = input("Pilihan (1-7): ").strip() or "1"
+    choice = input("Pilihan (1-8): ").strip() or "1"
     name, base_url, model = providers.get(choice, ("Custom", "", ""))
 
-    if choice == "7" or not base_url:
+    kind = "openai"
+    nexray_urls = None
+
+    if choice == "6":  # Nexray
+        kind = "nexray"
+        print("\nMasukkan 3 endpoint Nexray (GET <url>?text=<prompt>).")
+        print("Kosongkan kalau tidak punya, tapi minimal isi 1 URL agar bisa jalan.")
+        urls = []
+        for i in range(1, 4):
+            u = input(f"Nexray URL {i}: ").strip()
+            if u:
+                urls.append(u)
+        if not urls:
+            print("[!] Minimal 1 URL Nexray diperlukan. Setup dibatalkan.")
+            return load_config()
+        base_url = urls[0]
+        model = "nexray"
+        nexray_urls = urls
+
+    elif choice == "8" or not base_url:
         base_url = input(f"Base URL (contoh: https://api.openai.com/v1): ").strip()
         model = input(f"Nama model: ").strip()
     else:
@@ -140,21 +162,25 @@ def setup_wizard():
         if not model:
             print("[!] Model tidak boleh kosong. Coba lagi.")
 
-    # Tanya jenis endpoint (OpenAI-compatible vs custom GET API)
-    print(f"\nJenis endpoint:")
-    print(f"  1. OpenAI-compatible (default) — pakai /chat/completions")
-    print(f"  2. Custom API GET — pakai <url>?text=<prompt> (contoh Nexray)")
-    kind_choice = input("Pilihan (1/2): ").strip()
-    kind = "custom" if kind_choice == "2" else "openai"
+    # Tanya jenis endpoint hanya untuk custom / lainnya
+    if choice == "8":
+        print(f"\nJenis endpoint:")
+        print(f"  1. OpenAI-compatible (default) — pakai /chat/completions")
+        print(f"  2. Custom API GET — pakai <url>?text=<prompt> (contoh Nexray)")
+        kind_choice = input("Pilihan (1/2): ").strip()
+        kind = "custom" if kind_choice == "2" else "openai"
 
     api_key = ""
-    if kind != "custom" and "localhost" not in base_url and "127.0.0.1" not in base_url:
+    if kind not in ("custom", "nexray") and "localhost" not in base_url and "127.0.0.1" not in base_url:
         api_key = input("API Key: ").strip()
     if kind == "custom":
         print("  Custom API: masukkan URL lengkap endpoint, contoh https://api.nexray.eu.cc/ai/gpt-3.5-turbo")
 
     cfg = load_config()
-    cfg.update({"base_url": base_url, "api_key": api_key, "model": model, "kind": kind})
+    update = {"base_url": base_url, "api_key": api_key, "model": model, "kind": kind}
+    if nexray_urls:
+        update["nexray_urls"] = nexray_urls
+    cfg.update(update)
     save_config(cfg)
 
     # Simpan api_key ke .env agar tidak masuk config.json
