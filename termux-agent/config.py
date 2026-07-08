@@ -34,6 +34,7 @@ DEFAULTS = {
     "code_timeout": 30,
     "max_search_results": 5,
     "max_history": 50,
+    "key_pools": {},
 }
 
 

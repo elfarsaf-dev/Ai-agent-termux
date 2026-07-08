@@ -184,6 +184,32 @@ def _provider_label(cfg: dict) -> str:
 
 _ASSISTANT_ALLOWED_KEYS = {"role", "content", "tool_calls", "name", "function_call"}
 
+# ──────────────────────────────────────────────
+# MULTI-KEY ROTATION STATE
+# ──────────────────────────────────────────────
+
+_key_counters: dict = {}   # base_url → index berikutnya
+
+
+def _get_rotated_key(base_url: str, key_pool: list) -> str:
+    """
+    Ambil API key berikutnya dari pool secara round-robin.
+    Setiap request memakai key yang berbeda agar tidak kena rate limit
+    dari satu key terus-menerus.
+    """
+    if not key_pool:
+        return ""
+    idx = _key_counters.get(base_url, 0) % len(key_pool)
+    _key_counters[base_url] = (idx + 1) % len(key_pool)
+    return key_pool[idx]
+
+
+def _key_preview(key: str) -> str:
+    """Tampilkan key sebagian saja untuk keamanan."""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:6] + "..." + key[-4:]
+
 
 def _sanitize_messages(messages: list) -> list:
     """
@@ -371,11 +397,21 @@ def call_api(cfg: dict, messages: list, tools: list,
     fallbacks  = cfg.get("fallback_providers", [])
     providers  = [primary] + list(fallbacks)
 
+    key_pools  = cfg.get("key_pools", {})   # base_url → [key1, key2, ...]
+
     last_error = None
     for i, provider in enumerate(providers):
         label = _provider_label(provider)
         if i > 0 and on_switch:
             on_switch(label)
+
+        # Terapkan rotasi key jika pool tersedia untuk provider ini
+        base_url_norm = provider.get("base_url", "").rstrip("/")
+        pool = key_pools.get(base_url_norm, [])
+        if pool:
+            provider = dict(provider)
+            rotated_key = _get_rotated_key(base_url_norm, pool)
+            provider["api_key"] = rotated_key
 
         # Retry loop untuk provider ini
         wait_schedule = [2, 5, 10]   # detik tunggu saat 429
@@ -468,6 +504,7 @@ Perintah khusus:
   /clear     — hapus riwayat percakapan
   /config    — ubah provider/model/API key utama
   /fallback  — kelola provider cadangan (auto-switch saat limit)
+  /keys      — kelola multi API key (rotasi otomatis, maks 20 per provider)
   /status    — info konfigurasi + provider aktif
   /tools     — daftar tools yang tersedia
   /history   — lihat riwayat chat
@@ -683,22 +720,31 @@ class Agent:
         api_key = self.cfg.get("api_key", "")
         key_display = ("*" * 8 + api_key[-4:]) if len(api_key) > 4 else ("(kosong)" if not api_key else api_key)
         fallbacks = self.cfg.get("fallback_providers", [])
+        key_pools = self.cfg.get("key_pools", {})
         fb_lines = ""
         for i, fb in enumerate(fallbacks, 1):
             fb_label = _provider_label(fb)
             fb_model = fb.get("model", "-")
             active_mark = green(" ← aktif") if self.active_provider == fb_label else ""
-            fb_lines += f"\n  Fallback {i}: {cyan(fb_label)} / {fb_model}{active_mark}"
+            fb_url = fb.get("base_url", "").rstrip("/")
+            pool = key_pools.get(fb_url, [])
+            pool_info = cyan(f" [{len(pool)} key🔄]") if pool else ""
+            fb_lines += f"\n  Fallback {i}: {cyan(fb_label)} / {fb_model}{pool_info}{active_mark}"
         active_mark = green(" ← aktif") if self.active_provider == _provider_label(self.cfg) else ""
         url_display = self.cfg.get('base_url', '-')
         if self.cfg.get("kind") == "nexray":
             urls = self.cfg.get("nexray_urls", [])
             url_display = ", ".join(urls) if urls else "(kosong)"
+        primary_url = self.cfg.get("base_url", "").rstrip("/")
+        primary_pool = key_pools.get(primary_url, [])
+        key_pool_info = cyan(f"  [{len(primary_pool)} key aktif, rotasi 🔄]") if primary_pool else ""
+        total_pools = sum(len(v) for v in key_pools.values())
+        pools_summary = cyan(f"\n  Key Pools: {total_pools} key total di {len(key_pools)} provider (ketik /keys untuk kelola)") if key_pools else dim("\n  Key Pools: belum ada (ketik /keys untuk tambah rotasi key)")
         print(f"""
 {bold('Status Konfigurasi:')}
   Provider : {cyan(_provider_label(self.cfg))} / {self.cfg.get('model', '-')}{active_mark}
   URL      : {dim(url_display)}
-  API Key  : {dim(key_display)}{fb_lines}
+  API Key  : {dim(key_display)}{key_pool_info}{fb_lines}{pools_summary}
   Pesan    : {len(self.history)} dalam history
   Token    : {self.total_tokens:,} (sesi ini)
   Dir      : {os.getcwd()}
@@ -729,6 +775,148 @@ class Agent:
             elif role == "tool":
                 print(f"{bold(yellow('Tool:'))} {content[:200]}")
         print()
+
+
+# ──────────────────────────────────────────────
+# MULTI-KEY WIZARD
+# ──────────────────────────────────────────────
+
+_KEY_POOL_PROVIDERS = [
+    ("Groq",        "https://api.groq.com/openai/v1"),
+    ("OpenRouter",  "https://openrouter.ai/api/v1"),
+]
+MAX_KEYS_PER_POOL = 20
+
+
+def _keys_wizard(cfg: dict) -> dict:
+    """
+    Kelola pool API key untuk rotasi round-robin.
+    Key disimpan per base_url sehingga tetap ada meski provider utama diganti.
+    """
+    key_pools: dict = cfg.setdefault("key_pools", {})
+
+    while True:
+        print(f"\n{bold(cyan('🔑  MULTI API KEY — Rotasi Round-Robin'))}")
+        print(dim("─" * 48))
+        print("Setiap request pakai key berbeda secara bergantian.")
+        print(f"Maks {MAX_KEYS_PER_POOL} key per provider.\n")
+
+        # Daftar provider bawaan + provider utama (jika OpenAI-compatible)
+        shown: list[tuple[str, str]] = list(_KEY_POOL_PROVIDERS)
+        primary_url = cfg.get("base_url", "").rstrip("/")
+        primary_label = _provider_label(cfg)
+        # Tambahkan provider utama ke daftar jika belum ada
+        if primary_url and not any(u == primary_url for _, u in shown):
+            shown.append((primary_label, primary_url))
+        # Tambahkan provider fallback yang punya key pool
+        for fb in cfg.get("fallback_providers", []):
+            fb_url = fb.get("base_url", "").rstrip("/")
+            fb_label = _provider_label(fb)
+            if fb_url and not any(u == fb_url for _, u in shown):
+                if fb_url in key_pools:
+                    shown.append((fb_label, fb_url))
+
+        for i, (label, url) in enumerate(shown, 1):
+            pool = key_pools.get(url, [])
+            count = len(pool)
+            if count:
+                mark = green(f"✅ {count} key")
+            else:
+                mark = dim("(kosong)")
+            active = cyan(" ← utama") if url == primary_url else ""
+            print(f"  {bold(str(i)+'.')} {label:<14} {mark}{active}")
+
+        print(f"\n  {bold('q')} — selesai")
+        print(dim("─" * 48))
+        try:
+            choice = input(f"\n{bold(magenta('Pilih provider (angka): '))}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            break
+
+        if choice == "q":
+            break
+
+        try:
+            idx = int(choice) - 1
+            if not (0 <= idx < len(shown)):
+                raise ValueError
+        except ValueError:
+            print(yellow("Pilihan tidak valid."))
+            continue
+
+        label, url = shown[idx]
+        pool: list = key_pools.setdefault(url, [])
+
+        # ── Sub-menu per provider ──
+        while True:
+            print(f"\n{bold(cyan(f'🔑  {label}'))} {dim(f'({url})')}")
+            print(dim("─" * 48))
+            print(f"Rotasi round-robin — setiap request pakai key berbeda.\n")
+            if not pool:
+                print(f"  {dim('(belum ada key)')}")
+            else:
+                for j, k in enumerate(pool, 1):
+                    print(f"  {green('✅')} {j:>2}. {_key_preview(k)}")
+            remaining = MAX_KEYS_PER_POOL - len(pool)
+            print(dim(f"\n  {len(pool)}/{MAX_KEYS_PER_POOL} key (sisa slot: {remaining})"))
+            print(f"\n  {bold('a')} — tambah key")
+            print(f"  {bold('h')} — hapus key")
+            print(f"  {bold('q')} — kembali")
+            print(dim("─" * 48))
+            try:
+                sub = input(f"\n{bold(magenta('Pilihan: '))}").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                break
+
+            if sub == "q":
+                break
+
+            elif sub == "a":
+                if len(pool) >= MAX_KEYS_PER_POOL:
+                    print(yellow(f"Pool sudah penuh ({MAX_KEYS_PER_POOL} key). Hapus dulu yang lama."))
+                    continue
+                print(dim(f"Tempel API key (kosongkan untuk batal):"))
+                try:
+                    new_key = input("  API Key: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print()
+                    continue
+                if not new_key:
+                    print(yellow("Batal."))
+                    continue
+                if new_key in pool:
+                    print(yellow("Key sudah ada di pool, skip."))
+                    continue
+                pool.append(new_key)
+                cfg["key_pools"] = key_pools
+                save_config(cfg)
+                print(green(f"✅ Key ke-{len(pool)} ditambahkan. Pool {label}: {len(pool)} key aktif."))
+
+            elif sub == "h":
+                if not pool:
+                    print(yellow("Pool kosong, tidak ada yang dihapus."))
+                    continue
+                try:
+                    num = int(input("Hapus nomor berapa? ").strip()) - 1
+                    if not (0 <= num < len(pool)):
+                        raise ValueError
+                except (ValueError, KeyboardInterrupt, EOFError):
+                    print(yellow("Nomor tidak valid."))
+                    continue
+                removed = pool.pop(num)
+                if not pool:
+                    # Hapus entry jika pool kosong supaya bersih
+                    del key_pools[url]
+                cfg["key_pools"] = key_pools
+                save_config(cfg)
+                print(green(f"✅ Key {_key_preview(removed)} dihapus. Sisa: {len(pool)} key."))
+
+            else:
+                print(yellow("Pilihan tidak dikenal."))
+
+    return cfg
 
 
 # ──────────────────────────────────────────────
@@ -942,6 +1130,9 @@ def main():
                 agent.active_provider = _provider_label(cfg)
             elif cmd == "/fallback":
                 cfg = _fallback_wizard(cfg)
+                agent.cfg = cfg
+            elif cmd == "/keys":
+                cfg = _keys_wizard(cfg)
                 agent.cfg = cfg
             elif cmd == "/upgrade":
                 # Mode self-upgrade: AI edit kode dirinya sendiri
