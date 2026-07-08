@@ -188,7 +188,8 @@ _ASSISTANT_ALLOWED_KEYS = {"role", "content", "tool_calls", "name", "function_ca
 # MULTI-KEY ROTATION STATE
 # ──────────────────────────────────────────────
 
-_key_counters: dict = {}   # base_url → index berikutnya
+_key_counters: dict = {}      # base_url → index key berikutnya
+_provider_counter: int = 0   # index provider berikutnya (untuk mode rotasi)
 
 
 def _get_rotated_key(base_url: str, key_pool: list) -> str:
@@ -386,7 +387,9 @@ def call_api(cfg: dict, messages: list, tools: list,
     Provider dengan kind="custom" dipanggil pakai adapter GET, bukan OpenAI endpoint.
     on_switch(label) dipanggil saat beralih provider (untuk notif UI).
     """
-    # Bangun daftar provider: utama dulu, lalu fallback
+    global _provider_counter
+
+    # Bangun daftar provider
     primary = {
         "base_url": cfg.get("base_url", ""),
         "api_key" : cfg.get("api_key", ""),
@@ -397,12 +400,22 @@ def call_api(cfg: dict, messages: list, tools: list,
     fallbacks  = cfg.get("fallback_providers", [])
     providers  = [primary] + list(fallbacks)
 
-    key_pools  = cfg.get("key_pools", {})   # base_url → [key1, key2, ...]
+    key_pools      = cfg.get("key_pools", {})
+    rotation_mode  = cfg.get("rotation_mode", False)
+
+    # Mode Kombinasi: rotasi starting provider tiap request (round-robin)
+    # Kalau satu gagal, lanjut ke provider berikutnya seperti biasa.
+    if rotation_mode and len(providers) > 1:
+        start = _provider_counter % len(providers)
+        _provider_counter = (_provider_counter + 1) % len(providers)
+        providers = providers[start:] + providers[:start]
 
     last_error = None
     for i, provider in enumerate(providers):
         label = _provider_label(provider)
         if i > 0 and on_switch:
+            on_switch(label)
+        elif i == 0 and rotation_mode and on_switch and start > 0:  # type: ignore[possibly-undefined]
             on_switch(label)
 
         # Terapkan rotasi key jika pool tersedia untuk provider ini
@@ -503,7 +516,7 @@ Perintah khusus:
   /help      — tampilkan bantuan ini
   /clear     — hapus riwayat percakapan
   /config    — ubah provider/model/API key utama
-  /fallback  — kelola provider cadangan (auto-switch saat limit)
+  /fallback  — kelola provider kombinasi/cadangan (rotasi gantian atau switch saat error)
   /keys      — kelola multi API key (rotasi otomatis, maks 20 per provider)
   /status    — info konfigurasi + provider aktif
   /tools     — daftar tools yang tersedia
@@ -740,11 +753,15 @@ class Agent:
         key_pool_info = cyan(f"  [{len(primary_pool)} key aktif, rotasi 🔄]") if primary_pool else ""
         total_pools = sum(len(v) for v in key_pools.values())
         pools_summary = cyan(f"\n  Key Pools: {total_pools} key total di {len(key_pools)} provider (ketik /keys untuk kelola)") if key_pools else dim("\n  Key Pools: belum ada (ketik /keys untuk tambah rotasi key)")
+        rotation_mode = self.cfg.get("rotation_mode", False)
+        mode_str = green("🔄 Kombinasi (gantian tiap request)") if rotation_mode else yellow("⬇️  Cadangan (ganti saat error)")
+        fb_count = len(self.cfg.get("fallback_providers", []))
+        combo_info = f"\n  Providers: {1 + fb_count} provider terdaftar  |  Mode: {mode_str}"
         print(f"""
 {bold('Status Konfigurasi:')}
   Provider : {cyan(_provider_label(self.cfg))} / {self.cfg.get('model', '-')}{active_mark}
   URL      : {dim(url_display)}
-  API Key  : {dim(key_display)}{key_pool_info}{fb_lines}{pools_summary}
+  API Key  : {dim(key_display)}{key_pool_info}{fb_lines}{combo_info}{pools_summary}
   Pesan    : {len(self.history)} dalam history
   Token    : {self.total_tokens:,} (sesi ini)
   Dir      : {os.getcwd()}
@@ -924,31 +941,37 @@ def _keys_wizard(cfg: dict) -> dict:
 # ──────────────────────────────────────────────
 
 def _fallback_wizard(cfg: dict) -> dict:
-    """Kelola daftar provider cadangan secara interaktif."""
+    """Kelola daftar provider kombinasi/cadangan secara interaktif."""
     fallbacks = list(cfg.get("fallback_providers", []))
 
     while True:
-        print(f"\n{bold(cyan('⚡ Provider Cadangan (Fallback)'))}")
-        print(dim("─" * 44))
-        print("Kalau provider utama kena rate limit, agent otomatis")
-        print("pindah ke provider cadangan berikutnya.\n")
+        rotation_mode = cfg.get("rotation_mode", False)
+        mode_label = green("🔄 Kombinasi (gantian tiap request)") if rotation_mode else yellow("⬇️  Cadangan (ganti saat error saja)")
 
-        # Tampilkan provider utama
+        print(f"\n{bold(cyan('⚡ Kombinasi & Cadangan Provider'))}")
+        print(dim("─" * 48))
+        print(f"  Mode: {mode_label}\n")
+
+        key_pools = cfg.get("key_pools", {})
+        # Tampilkan semua provider
         print(f"  {bold('0.')} {green('[UTAMA]')} {_provider_label(cfg)} / {cfg.get('model','-')}")
         if not fallbacks:
-            print(f"  {dim('(belum ada provider cadangan)')}")
+            print(f"  {dim('(belum ada provider tambahan — ketik a untuk tambah)')}")
         else:
             for i, fb in enumerate(fallbacks, 1):
                 label = _provider_label(fb)
                 model = fb.get("model", "-")
-                has_key = "🔑" if fb.get("api_key") else dim("(no key)")
-                print(f"  {bold(str(i)+'.')} {cyan(label)} / {model}  {has_key}")
+                fb_url = fb.get("base_url", "").rstrip("/")
+                pool   = key_pools.get(fb_url, [])
+                key_info = cyan(f" [{len(pool)}🔑]") if pool else ("🔑" if fb.get("api_key") else dim(" (no key)"))
+                print(f"  {bold(str(i)+'.')} {cyan(label)} / {model}{key_info}")
 
-        print(f"\n  {bold('a')} — tambah provider cadangan")
-        print(f"  {bold('h')} — hapus provider cadangan")
-        print(f"  {bold('t')} — test urutan provider saat ini")
+        print(f"\n  {bold('m')} — ganti mode ({('→ Cadangan' if rotation_mode else '→ Kombinasi')})")
+        print(f"  {bold('a')} — tambah provider")
+        print(f"  {bold('h')} — hapus provider")
+        print(f"  {bold('t')} — lihat urutan rotasi")
         print(f"  {bold('q')} — selesai")
-        print(dim("─" * 44))
+        print(dim("─" * 48))
 
         try:
             choice = input(f"\n{bold(magenta('Pilihan: '))}").strip().lower()
@@ -1045,13 +1068,31 @@ def _fallback_wizard(cfg: dict) -> dict:
             except (ValueError, KeyboardInterrupt, EOFError):
                 pass
 
+        elif choice == "m":
+            new_mode = not cfg.get("rotation_mode", False)
+            cfg["rotation_mode"] = new_mode
+            save_config(cfg)
+            if new_mode:
+                print(green("✅ Mode KOMBINASI aktif — provider bergiliran tiap request."))
+            else:
+                print(yellow("✅ Mode CADANGAN aktif — ganti provider hanya saat error."))
+
         elif choice == "t":
+            rotation_mode = cfg.get("rotation_mode", False)
             total = 1 + len(fallbacks)
-            print(f"\n{bold('Urutan provider saat ini:')}")
-            print(f"  1. {green('[UTAMA]')} {_provider_label(cfg)} / {cfg.get('model','-')}")
-            for i, fb in enumerate(fallbacks, 2):
-                print(f"  {i}. {cyan('[CADANGAN]')} {_provider_label(fb)} / {fb.get('model','-')}")
-            print(f"\n  {dim(f'Total {total} provider. Agent akan coba urutan ini saat ada error.')}")
+            all_providers = [{"label": _provider_label(cfg), "model": cfg.get("model", "-"), "is_primary": True}]
+            all_providers += [{"label": _provider_label(fb), "model": fb.get("model", "-"), "is_primary": False} for fb in fallbacks]
+            mode_str = "🔄 Kombinasi (gantian)" if rotation_mode else "⬇️  Cadangan (saat error)"
+            print(f"\n{bold(f'Urutan rotasi — Mode: {mode_str}')}")
+            for i, p in enumerate(all_providers, 1):
+                tag = green("[UTAMA]") if p["is_primary"] else cyan("[TAMBAHAN]")
+                print(f"  {i}. {tag} {p['label']} / {p['model']}")
+            if rotation_mode:
+                p0 = all_providers[0]["label"]
+                p1 = all_providers[1]["label"] if total > 1 else p0
+                print(f"\n  {dim(f'Request 1→{p0}, request 2→{p1}, dst.')}")
+            else:
+                print(f"\n  {dim(f'Total {total} provider. Ganti hanya saat error/limit.')}")
 
         else:
             print(yellow("Pilihan tidak dikenal."))

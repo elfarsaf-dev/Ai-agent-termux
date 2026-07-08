@@ -35,6 +35,7 @@ DEFAULTS = {
     "max_search_results": 5,
     "max_history": 50,
     "key_pools": {},
+    "rotation_mode": False,
 }
 
 
