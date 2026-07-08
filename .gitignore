@@ -47,3 +47,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Termux Agent — data lokal (API keys, history, config)
+termux-agent/config.json
+termux-agent/.env
+termux-agent/chat_history.json
+termux-agent/*.bak
