@@ -418,13 +418,20 @@ def call_api(cfg: dict, messages: list, tools: list,
         elif i == 0 and rotation_mode and on_switch and start > 0:  # type: ignore[possibly-undefined]
             on_switch(label)
 
-        # Terapkan rotasi key jika pool tersedia untuk provider ini
+        # Terapkan rotasi key jika pool tersedia untuk provider ini.
+        # Key dari /config (api_key) juga ikut digilir kalau belum ada di pool.
         base_url_norm = provider.get("base_url", "").rstrip("/")
-        pool = key_pools.get(base_url_norm, [])
-        if pool:
+        pool = list(key_pools.get(base_url_norm, []))
+        single_key = provider.get("api_key", "")
+        if single_key and single_key not in pool:
+            pool.insert(0, single_key)   # masukkan key /config ke pool (di depan)
+        if len(pool) > 1:
             provider = dict(provider)
             rotated_key = _get_rotated_key(base_url_norm, pool)
             provider["api_key"] = rotated_key
+        elif len(pool) == 1 and not provider.get("api_key"):
+            provider = dict(provider)
+            provider["api_key"] = pool[0]
 
         # Retry loop untuk provider ini
         wait_schedule = [2, 5, 10]   # detik tunggu saat 429
