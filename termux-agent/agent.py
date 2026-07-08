@@ -182,6 +182,22 @@ def _provider_label(cfg: dict) -> str:
     return host
 
 
+_REASONING_FIELDS = {"reasoning_details", "reasoning", "thinking"}
+
+
+def _sanitize_messages(messages: list) -> list:
+    """
+    Hapus field reasoning (reasoning_details, reasoning, thinking) dari
+    pesan assistant agar kompatibel dengan semua provider (termasuk Groq).
+    """
+    sanitized = []
+    for m in messages:
+        if m.get("role") == "assistant" and any(k in m for k in _REASONING_FIELDS):
+            m = {k: v for k, v in m.items() if k not in _REASONING_FIELDS}
+        sanitized.append(m)
+    return sanitized
+
+
 def _raw_call(provider: dict, messages: list, tools: list, base_cfg: dict) -> dict:
     """
     Satu kali panggil API pakai provider tertentu.
@@ -194,7 +210,7 @@ def _raw_call(provider: dict, messages: list, tools: list, base_cfg: dict) -> di
 
     payload = {
         "model"      : model,
-        "messages"   : messages,
+        "messages"   : _sanitize_messages(messages),
         "tools"      : tools,
         "tool_choice": "auto",
         "max_tokens" : int(base_cfg.get("max_tokens", 4096)),
@@ -586,8 +602,9 @@ class Agent:
                 return reply
 
             # Ada tool calls → jalankan semua
-            messages.append(msg)
-            self.history.append(msg)
+            clean_msg = {k: v for k, v in msg.items() if k not in _REASONING_FIELDS}
+            messages.append(clean_msg)
+            self.history.append(clean_msg)
 
             tool_results = []
             for tc in tool_calls:
