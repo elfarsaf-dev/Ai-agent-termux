@@ -75,8 +75,13 @@ def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[in
             return header + "".join(lines)
 
         if len(lines) > 500:
-            preview = "".join(lines[:500])
-            return f"[{path}] ({len(lines)} baris, menampilkan 500 pertama)\n{preview}\n...(terpotong)"
+            preview = "".join(lines[:100])
+            return (
+                f"[{path}] ({len(lines)} baris, file besar)\n"
+                f"💡 Gunakan execute_shell(grep/rg/sed/wc -l) untuk cari bagian relevan, "
+                f"atau read_file(start_line, end_line) untuk baca snippet.\n"
+                f"Preview 100 baris pertama:\n{preview}\n...(terpotong)"
+            )
         return f"[{path}]\n{content}"
     except Exception as e:
         return f"❌ Error membaca file: {e}"
@@ -85,6 +90,9 @@ def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[in
 def write_file(path: str, content: str, append: bool = False) -> str:
     """Tulis konten ke file. append=True untuk menambah ke akhir file."""
     p = Path(path).expanduser().resolve()
+    # Source code agent harus diedit pakai patch_file (lebih aman & hemat token)
+    if p.name in {"agent.py", "tools.py", "config.py"} and p.parent == Path(__file__).parent.resolve():
+        return f"❌ Untuk mengedit source code agent ({p.name}), gunakan patch_file, bukan write_file."
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
@@ -421,7 +429,9 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Jalankan perintah shell/terminal di sistem. "
                 "Gunakan untuk: install package, jalankan program, manipulasi file via CLI, "
-                "cek sistem, download file, dll."
+                "cek sistem, download file, dll. "
+                "Sangat berguna untuk efisiensi: pakai grep, rg, find, sed, awk, wc -l, head, tail "
+                "untuk mencari/inspeksi file tanpa harus membaca seluruh file."
             ),
             "parameters": {
                 "type": "object",
@@ -437,7 +447,11 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Baca konten file dari filesystem.",
+            "description": (
+                "Baca konten file dari filesystem. "
+                "Untuk file besar, gunakan start_line/end_line untuk baca hanya bagian yang relevan; "
+                "hindari membaca seluruh file besar sekaligus."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

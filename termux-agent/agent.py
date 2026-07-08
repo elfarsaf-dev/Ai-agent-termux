@@ -476,17 +476,18 @@ File source code kamu ada di direktori: {agent_dir}
 Instruksi user untuk upgrade/perbaikan:
 {user_request}
 
-Langkah yang harus kamu lakukan:
-1. Baca file yang relevan dengan read_file (baca source code kamu sendiri)
-2. Rencanakan perubahan — pastikan kamu paham struktur kodenya dulu
-3. Terapkan perubahan dengan patch_file (JANGAN tulis ulang seluruh file)
-4. Setelah semua patch berhasil, panggil reload_agent untuk restart
+Langkah yang harus kamu lakukan (HEMAT TOKEN, JANGAN baca seluruh file besar):
+1. Gunakan execute_shell dengan grep/rg/find/wc -l/head/tail untuk MENCARI letak kode yang relevan.
+2. Baca hanya bagian yang diperlukan dengan read_file(start_line, end_line).
+3. Rencanakan perubahan — pastikan kamu paham struktur kodenya dulu.
+4. Terapkan perubahan dengan patch_file (JANGAN tulis ulang seluruh file).
+5. Setelah semua patch berhasil, panggil reload_agent untuk restart.
 
 Aturan keselamatan:
 - Selalu gunakan patch_file, bukan write_file, untuk mengedit source code agent
 - Backup otomatis dibuat sebelum setiap patch (.bak)
 - patch_file akan validasi syntax Python sebelum menyimpan
-- Kalau tidak yakin, baca dulu kodenya sebelum edit
+- Kalau tidak yakin, baca dulu kodenya sebelum edit (hanya snippet yang relevan)
 - Perubahan pada TOOL_DEFINITIONS harus diikuti perubahan di dispatch_tool()
 """
 
@@ -519,7 +520,8 @@ class Agent:
                 f"- Source code kamu ada di: {agent_dir}\n"
                 f"- File utama: agent.py, tools.py, config.py\n"
                 f"- Gunakan list_agent_files() untuk lihat semua file\n"
-                f"- Gunakan read_file() untuk baca kode kamu sendiri\n"
+                f"- Gunakan execute_shell(grep/rg/find/wc -l) untuk mencari kode yang relevan; JANGAN baca seluruh file besar dulu\n"
+                f"- Gunakan read_file(start_line, end_line) untuk baca snippet yang diperlukan\n"
                 f"- Gunakan patch_file() untuk edit kode kamu sendiri (LEBIH AMAN dari write_file)\n"
                 f"- Gunakan reload_agent() untuk restart setelah edit selesai"
             ),
