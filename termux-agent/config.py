@@ -98,7 +98,7 @@ PROVIDER_PRESETS: dict[str, tuple[str, str, str]] = {
     "2": ("OpenAI",              "https://api.openai.com/v1",                               "gpt-4o"),
     "3": ("Groq",                "https://api.groq.com/openai/v1",                          "llama-3.3-70b-versatile"),
     "4": ("Together AI",         "https://api.together.xyz/v1",                             "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
-    "5": ("OpenRouter",          "https://openrouter.ai/api/v1",                            "openai/gpt-4o"),
+    "5": ("OpenRouter",          "https://openrouter.ai/api/v1",                            ""),
     "6": ("Ollama (lokal)",      "http://localhost:11434/v1",                               "llama3"),
     "7": ("Custom / Lainnya",   "",                                                         ""),
 }
@@ -115,7 +115,11 @@ def setup_wizard():
 
     print("Pilih provider:")
     for k, (name, url, model) in providers.items():
-        note = " ← limit cepet, cocok buat fallback" if "Groq" in name else ""
+        note = ""
+        if "Groq" in name:
+            note = " ← limit cepet, cocok buat fallback"
+        elif "OpenRouter" in name:
+            note = " ← ketik model ID manual (contoh: openai/gpt-4o)"
         print(f"  {k}. {name}{note}")
     print()
 
@@ -129,6 +133,12 @@ def setup_wizard():
         custom_model = input(f"Model [{model}]: ").strip()
         if custom_model:
             model = custom_model
+
+    # Pastikan model tidak kosong (wajib untuk OpenRouter dsb)
+    while not model:
+        model = input(f"Model ID untuk {name} (wajib, contoh: openai/gpt-4o): ").strip()
+        if not model:
+            print("[!] Model tidak boleh kosong. Coba lagi.")
 
     # Tanya jenis endpoint (OpenAI-compatible vs custom GET API)
     print(f"\nJenis endpoint:")

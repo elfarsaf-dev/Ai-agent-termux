@@ -640,7 +640,11 @@ def _fallback_wizard(cfg: dict) -> dict:
             print(f"\n{bold('Pilih provider cadangan:')}")
             presets = PROVIDER_PRESETS
             for k, (name, url, model) in presets.items():
-                print(f"  {k}. {name}  {dim(model)}")
+                note = ""
+                if "OpenRouter" in name:
+                    note = " ← ketik model ID manual"
+                model_disp = dim(model) if model else dim("(ketik model ID)")
+                print(f"  {k}. {name}  {model_disp}{note}")
             try:
                 pc = input("Pilihan (atau Enter untuk custom): ").strip()
             except (KeyboardInterrupt, EOFError):
@@ -656,12 +660,15 @@ def _fallback_wizard(cfg: dict) -> dict:
                         print(yellow("Base URL tidak boleh kosong. Batal."))
                         continue
                 if not model:
-                    model = input("Nama model: ").strip()
+                    model = input("Nama model / model ID (wajib, contoh: openai/gpt-4o): ").strip()
                     if not model:
                         print(yellow("Nama model tidak boleh kosong. Batal."))
                         continue
                 custom_m = input(f"Model [{model}]: ").strip()
                 model = custom_m or model
+                if not model:
+                    print(yellow("Nama model tidak boleh kosong. Batal."))
+                    continue
             else:
                 # Enter ditekan tanpa pilih preset → full custom
                 base_url = input("Base URL (contoh: https://api.example.com/v1): ").strip()
