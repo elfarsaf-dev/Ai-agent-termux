@@ -77,6 +77,78 @@ def typewriter(text: str, delay: float = 0.018):
 
 
 # ──────────────────────────────────────────────
+# PERSISTENT CHAT HISTORY
+# ──────────────────────────────────────────────
+
+HISTORY_FILE = Path(__file__).parent / "chat_history.json"
+_ALLOWED_HISTORY_ROLES = {"user", "assistant", "tool"}
+
+
+def load_history() -> list:
+    """Load riwayat chat dari file JSON, hanya terima entri valid."""
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [
+                m for m in data
+                if isinstance(m, dict) and m.get("role") in _ALLOWED_HISTORY_ROLES
+            ]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _trim_history(history: list, max_hist: int) -> list:
+    """Trim history dengan menjaga blok percakapan & tool call utuh."""
+    if max_hist < 1:
+        return history
+    if len(history) <= max_hist:
+        return history
+
+    # Coba hapus turn/user-block terlama dari depan.
+    while len(history) > max_hist:
+        try:
+            idx = next(i for i, m in enumerate(history[1:], start=1) if m.get("role") == "user")
+        except StopIteration:
+            break
+        history = history[idx:]
+
+    # Jika masih kepanjangan (satu turn besar), potong dari awal turn
+    # tapi jangan pisahkan assistant tool_calls dengan tool result-nya.
+    if len(history) > max_hist:
+        excess = len(history) - max_hist
+        cutoff = excess
+        if history[cutoff].get("role") == "tool":
+            tool_call_id = history[cutoff].get("tool_call_id")
+            for i in range(cutoff - 1, -1, -1):
+                msg = history[i]
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    ids = {tc.get("id") for tc in msg.get("tool_calls", [])}
+                    if tool_call_id in ids:
+                        cutoff = i
+                        break
+        history = history[cutoff:]
+
+    return history
+
+
+def save_history(history: list):
+    """Simpan riwayat chat ke file JSON dengan permission ketat."""
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+        try:
+            os.chmod(HISTORY_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        print(dim(f"[history] gagal simpan: {e}"))
+
+
+# ──────────────────────────────────────────────
 # HTTP CLIENT (pakai urllib bawaan Python)
 # ──────────────────────────────────────────────
 
@@ -426,7 +498,7 @@ Aturan keselamatan:
 class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.history: list[dict] = []
+        self.history: list[dict] = load_history()
         self.total_tokens = 0
         self.active_provider: str = _provider_label(cfg)  # provider yg sedang dipakai
 
@@ -459,10 +531,9 @@ class Agent:
         self.active_provider = _provider_label(self.cfg)
         self.history.append({"role": "user", "content": user_input})
 
-        # Trim history agar tidak terlalu panjang
+        # Trim history agar tidak terlalu panjang, tapi jaga urutan tool call
         max_hist = int(self.cfg.get("max_history", 50))
-        if len(self.history) > max_hist:
-            self.history = self.history[-max_hist:]
+        self.history = _trim_history(self.history, max_hist)
 
         messages = [self._system_message()] + self.history
 
@@ -504,10 +575,12 @@ class Agent:
             if not tool_calls:
                 reply = msg.get("content") or ""
                 self.history.append({"role": "assistant", "content": reply})
+                save_history(self.history)
                 return reply
 
             # Ada tool calls → jalankan semua
             messages.append(msg)
+            self.history.append(msg)
 
             tool_results = []
             for tc in tool_calls:
@@ -528,11 +601,13 @@ class Agent:
 
                 self._print_tool_result(result)
 
-                tool_results.append({
+                tr = {
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
-                })
+                }
+                tool_results.append(tr)
+                self.history.append(tr)
 
             messages.extend(tool_results)
             # Lanjut loop sampai AI selesai
@@ -576,6 +651,10 @@ class Agent:
 
     def clear_history(self):
         self.history.clear()
+        try:
+            HISTORY_FILE.unlink(missing_ok=True)
+        except OSError as e:
+            print(dim(f"[history] gagal hapus file: {e}"))
         print(green("✅ Riwayat percakapan dihapus."))
 
     def show_status(self):
@@ -620,7 +699,13 @@ class Agent:
             if role == "user":
                 print(f"\n{bold(cyan('Kamu:'))} {content[:200]}")
             elif role == "assistant":
-                print(f"{bold(green('AI:'))} {content[:200]}")
+                if msg.get("tool_calls"):
+                    names = [tc.get("function", {}).get("name", "") for tc in msg.get("tool_calls", [])]
+                    print(f"{bold(green('AI:'))} [tool calls: {', '.join(names)}]")
+                else:
+                    print(f"{bold(green('AI:'))} {content[:200]}")
+            elif role == "tool":
+                print(f"{bold(yellow('Tool:'))} {content[:200]}")
         print()
 
 
@@ -806,6 +891,7 @@ def main():
         try:
             user_input = input(f"\n{bold(magenta('›'))} ").strip()
         except (KeyboardInterrupt, EOFError):
+            save_history(agent.history)
             print(f"\n{dim('Sampai jumpa! 👋')}")
             sys.exit(0)
 
@@ -815,6 +901,7 @@ def main():
         if user_input.startswith("/"):
             cmd = user_input.lower().split()[0]
             if cmd in ("/exit", "/quit", "/q"):
+                save_history(agent.history)
                 print(dim("Sampai jumpa! 👋"))
                 sys.exit(0)
             elif cmd == "/help":
