@@ -33,6 +33,10 @@ from tools import TOOL_DEFINITIONS, dispatch_tool
 
 NO_COLOR = os.environ.get("NO_COLOR") or not sys.stdout.isatty()
 
+# Sinkronkan setting warna ke module ui
+import ui
+ui.NO_COLOR = NO_COLOR
+
 def _c(text: str, code: str) -> str:
     if NO_COLOR:
         return text
@@ -545,8 +549,9 @@ class Agent:
 
         while True:
             try:
-                response = call_api(self.cfg, messages, TOOL_DEFINITIONS,
-                                    on_switch=_on_provider_switch)
+                with ui.Spinner("AI berpikir..."):
+                    response = call_api(self.cfg, messages, TOOL_DEFINITIONS,
+                                        on_switch=_on_provider_switch)
             except APIError as e:
                 if e.status_code == 401:
                     return red("❌ API key tidak valid. Ketik /config untuk atur ulang.")
@@ -616,7 +621,7 @@ class Agent:
 
     def _print_tool_call(self, name: str, args: dict):
         summary_map = {
-            "execute_shell":   lambda a: a.get("command", ""),
+            "execute_shell":   lambda a: a.get("command", "")[:70],
             "run_python":      lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
             "run_bash":        lambda a: a.get("code", "")[:60].replace("\n", "↵") + "...",
             "read_file":       lambda a: a.get("path", ""),
@@ -629,27 +634,24 @@ class Agent:
             "list_agent_files":lambda a: "source files",
         }
         icon_map = {
-            "execute_shell": "🖥️ ", "run_python": "🐍", "run_bash": "📜",
-            "read_file": "📖", "write_file": "✏️ ", "list_directory": "📁",
+            "execute_shell": "🖥️", "run_python": "🐍", "run_bash": "📜",
+            "read_file": "📖", "write_file": "✏️", "list_directory": "📁",
             "web_search": "🔍", "fetch_url": "🌐",
-            "patch_file": "🔧", "reload_agent": "🔄", "list_agent_files": "📂",
+            "patch_file": "📝", "reload_agent": "🔄", "list_agent_files": "📂",
         }
-        icon = icon_map.get(name, "⚙️ ")
+        icon = icon_map.get(name, "⚙️")
         try:
             summary = summary_map.get(name, lambda a: str(a)[:60])(args)
         except Exception:
             summary = ""
-        print(f"\n{dim('┌─')} {icon} {yellow(name)} {dim(summary)}")
+        ui.log_action(icon, name, summary)
 
     def _print_tool_result(self, result: str):
         lines = result.strip().splitlines()
         if not lines:
-            return
-        for line in lines[:20]:
-            print(f"  {dim('│')} {line}")
-        if len(lines) > 20:
-            print(f"  {dim('│')} {dim(f'... (+{len(lines)-20} baris)')}")
-        print(f"{dim('└─')}")
+            ui.log_done("selesai")
+        else:
+            ui.log_done(f"selesai ({len(lines)} baris output)")
 
     def clear_history(self):
         self.history.clear()
@@ -972,14 +974,13 @@ membuat perubahan yang kamu minta, lalu restart otomatis.
             continue
 
         print()
+        print(dim("─" * 44))
+        print(f"{bold(cyan('Kamu:'))} {user_input}")
         try:
             reply = agent.chat(user_input)
 
-            # Bersihkan layar, tampilkan ulang konteks ringkas
-            clear_screen()
-            print(dim("─" * 44))
-            print(f"{bold(cyan('Kamu:'))} {user_input}\n")
-            print(f"{bold(green('AI:'))}")
+            print(f"{bold(green('AI:'))} ", end="")
+            sys.stdout.flush()
             if reply.startswith("❌"):
                 # Error — langsung print tanpa animasi
                 print(reply)

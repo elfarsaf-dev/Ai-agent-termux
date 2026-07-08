@@ -15,6 +15,8 @@ import urllib.error
 from pathlib import Path
 from typing import Optional
 
+from ui import Spinner
+
 
 # ──────────────────────────────────────────────
 # SHELL
@@ -24,15 +26,16 @@ def execute_shell(command: str, timeout: int = 30, working_dir: Optional[str] = 
     """Jalankan shell command dan kembalikan output-nya."""
     cwd = working_dir or os.getcwd()
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env={**os.environ, "TERM": "xterm-256color"},
-        )
+        with Spinner(f"menjalankan: {command[:50]}..."):
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env={**os.environ, "TERM": "xterm-256color"},
+            )
         output_parts = []
         if result.stdout.strip():
             output_parts.append(result.stdout.strip())
@@ -389,13 +392,14 @@ def run_bash(code: str, timeout: int = 30) -> str:
     os.chmod(tmp_path, 0o755)
 
     try:
-        result = subprocess.run(
-            ["bash", tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ},
-        )
+        with Spinner("menjalankan bash script..."):
+            result = subprocess.run(
+                ["bash", tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ},
+            )
         out = result.stdout.strip()
         err = result.stderr.strip()
         parts = []
