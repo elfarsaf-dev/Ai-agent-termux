@@ -525,6 +525,7 @@ Perintah khusus:
   /config    — ubah provider/model/API key utama
   /fallback  — kelola provider kombinasi/cadangan (rotasi gantian atau switch saat error)
   /keys      — kelola multi API key (rotasi otomatis, maks 20 per provider)
+  /webui     — buka Web UI di browser (chat + preview HTML otomatis)
   /status    — info konfigurasi + provider aktif
   /tools     — daftar tools yang tersedia
   /history   — lihat riwayat chat
@@ -1108,6 +1109,41 @@ def _fallback_wizard(cfg: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
+# WEB UI
+# ──────────────────────────────────────────────
+
+DEFAULT_WEBUI_PORT = 7860
+_webui_server = None
+
+
+def _start_webui(agent, port: int = DEFAULT_WEBUI_PORT):
+    """Jalankan web UI di background thread dan tampilkan URL."""
+    global _webui_server
+    try:
+        import web_ui
+    except ImportError:
+        print(red("❌ web_ui.py tidak ditemukan di direktori agent."))
+        return
+
+    if _webui_server is not None:
+        print(yellow(f"⚠️  Web UI sudah berjalan di port {port}. Buka browser:"))
+        print(cyan(f"   http://localhost:{port}"))
+        return
+
+    try:
+        _webui_server = web_ui.start(port=port, agent=agent)
+        print(green(f"✅ Web UI aktif!"))
+        print(f"   Buka di browser: {bold(cyan(f'http://localhost:{port}'))}")
+        print(dim(f"   Atau dari HP di jaringan yang sama: http://<IP-mu>:{port}"))
+        print(dim(f"   Web UI tetap jalan di background. Chat di sini tetap bisa."))
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(yellow(f"⚠️  Port {port} sudah dipakai. Coba /webui {port+1}"))
+        else:
+            print(red(f"❌ Gagal start Web UI: {e}"))
+
+
+# ──────────────────────────────────────────────
 # MAIN LOOP
 # ──────────────────────────────────────────────
 
@@ -1182,6 +1218,13 @@ def main():
             elif cmd == "/keys":
                 cfg = _keys_wizard(cfg)
                 agent.cfg = cfg
+            elif cmd == "/webui":
+                parts = user_input.split()
+                port = DEFAULT_WEBUI_PORT
+                if len(parts) > 1:
+                    try: port = int(parts[1])
+                    except ValueError: pass
+                _start_webui(agent, port)
             elif cmd == "/upgrade":
                 # Mode self-upgrade: AI edit kode dirinya sendiri
                 rest = user_input[len("/upgrade"):].strip()

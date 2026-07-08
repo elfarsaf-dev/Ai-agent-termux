@@ -102,6 +102,12 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         with open(p, mode, encoding="utf-8") as f:
             f.write(content)
         action = "ditambahkan ke" if append else "ditulis ke"
+        # Notifikasi web UI kalau sedang aktif
+        try:
+            import web_ui as _wui
+            _wui.notify_file_written(str(p))
+        except ImportError:
+            pass
         return f"✅ Konten berhasil {action} {path} ({len(content)} karakter)"
     except Exception as e:
         return f"❌ Error menulis file: {e}"
